@@ -255,6 +255,29 @@ which validates the translation without the Scry backend. `tests/e2e.rs` runs
 the same programs through the whole toolchain on the simulator; set
 `LLVM2CLIF_REQUIRE_TOOLS=1` to make missing tools an error instead of a skip.
 
+## Why a hand-written LLVM IR parser?
+
+`src/llvm/` parses the textual IR itself instead of using a crate, because
+no published crate fits a tool that only needs `clang` and `opt` installed:
+
+- `llvm-ir` and `inkwell` parse through `llvm-sys`, so every machine that
+  builds llvm2clif needs a version-matched LLVM *development* install
+  (headers, static libraries, `llvm-config`). The official Windows LLVM
+  installer does not ship these, and the version must match the crate's
+  feature flag rather than whatever `clang` is on `PATH`.
+- `llvm-bitcode` only decodes the bitstream container, not modules,
+  functions or instructions.
+- The pure-Rust text parsers on crates.io (`llvmkit-asmparser` 0.0.x,
+  `llvm-in-rust-ir-parser` 0.1, `omniscope-ir`, `vicis`) are either
+  line-oriented analysers, pre-opaque-pointer (LLVM 14 and older), or too
+  young to accept real compiler output: when this was evaluated, the two
+  most complete ones parsed 5 and 0 of 237 clang 18 modules produced from
+  `tests/programs` at `-O0`..`-Oz`, while the parser here accepted all 237.
+
+The parser is about 2,700 lines, needs no build-time dependencies and
+targets exactly the subset `clang`/`opt` emit (opaque pointers, LLVM 15+).
+Unsupported constructs are reported as such rather than mis-parsed.
+
 ## Layout
 
 ```

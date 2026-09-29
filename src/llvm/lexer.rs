@@ -32,6 +32,10 @@ pub enum Tok {
     Bang,
     /// `#12` attribute group reference.
     AttrGroup(u32),
+    /// `#dbg_value` and friends: the name of a debug record (LLVM 19+).
+    DbgRecord(String),
+    /// `|`, used between debug-info flags inside `!DIxxx(...)` nodes.
+    Pipe,
     /// `$name` comdat reference.
     Comdat(String),
     /// `...`
@@ -65,6 +69,8 @@ impl fmt::Display for Tok {
             Tok::MetaRef(s) => write!(f, "!{s}"),
             Tok::Bang => write!(f, "!"),
             Tok::AttrGroup(n) => write!(f, "#{n}"),
+            Tok::DbgRecord(s) => write!(f, "#{s}"),
+            Tok::Pipe => write!(f, "|"),
             Tok::Comdat(s) => write!(f, "${s}"),
             Tok::Ellipsis => write!(f, "..."),
             Tok::LParen => write!(f, "("),
@@ -285,6 +291,16 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, LexError> {
             }
             b'#' => {
                 let start = i + 1;
+                if bytes.get(start).is_some_and(|&b| is_ident_start(b)) {
+                    // `#dbg_value(...)`: a debug record (LLVM 19 and newer).
+                    let (name, next) = lex_ident(bytes, start);
+                    toks.push(Token {
+                        tok: Tok::DbgRecord(name),
+                        line,
+                    });
+                    i = next;
+                    continue;
+                }
                 let mut j = start;
                 while j < bytes.len() && bytes[j].is_ascii_digit() {
                     j += 1;
@@ -307,6 +323,13 @@ pub fn tokenize(src: &str) -> Result<Vec<Token>, LexError> {
                     line,
                 });
                 i = j;
+            }
+            b'|' => {
+                toks.push(Token {
+                    tok: Tok::Pipe,
+                    line,
+                });
+                i += 1;
             }
             b'0'..=b'9' | b'-' | b'+' => {
                 // Numbers: integers, decimal floats (1.5e+3), hex floats
@@ -596,5 +619,45 @@ mod tests {
                 Tok::Eof
             ]
         );
+    }
+
+    #[test]
+    fn debug_records_and_flag_separators() {
+        assert_eq!(
+            toks("  #dbg_value(i32 %a, !9, !DIExpression(), !10)"),
+            vec![
+                Tok::DbgRecord("dbg_value".into()),
+                Tok::LParen,
+                Tok::Ident("i32".into()),
+                Tok::Local("a".into()),
+                Tok::Comma,
+                Tok::MetaRef("9".into()),
+                Tok::Comma,
+                Tok::Bang,
+                Tok::Ident("DIExpression".into()),
+                Tok::LParen,
+                Tok::RParen,
+                Tok::Comma,
+                Tok::MetaRef("10".into()),
+                Tok::RParen,
+                Tok::Eof
+            ]
+        );
+        assert_eq!(
+            toks("!DISubprogram(flags: DIFlagPrototyped | DIFlagAllCallsDescribed)"),
+            vec![
+                Tok::Bang,
+                Tok::Ident("DISubprogram".into()),
+                Tok::LParen,
+                Tok::Ident("flags".into()),
+                Tok::Colon,
+                Tok::Ident("DIFlagPrototyped".into()),
+                Tok::Pipe,
+                Tok::Ident("DIFlagAllCallsDescribed".into()),
+                Tok::RParen,
+                Tok::Eof
+            ]
+        );
+        assert_eq!(toks("#3"), vec![Tok::AttrGroup(3), Tok::Eof]);
     }
 }

@@ -863,6 +863,11 @@ impl Parser {
                         self.next();
                     }
                 }
+                Tok::MetaRef(_) => {
+                    // `declare !dbg !1 ...`: a metadata attachment.
+                    self.next();
+                    self.skip_metadata_value(None)?;
+                }
                 t => return self.err(format!("unexpected `{t}` in function header")),
             }
         }
@@ -1068,6 +1073,12 @@ impl Parser {
                 match self.peek() {
                     Tok::Label(_) | Tok::RBrace => break,
                     Tok::Eof => return self.err("unexpected end of file in function body"),
+                    Tok::DbgRecord(name) if name.starts_with("dbg_") => {
+                        // `#dbg_value(...)` debug records carry no code.
+                        self.next();
+                        self.skip_balanced()?;
+                        continue;
+                    }
                     _ => {}
                 }
                 let inst = self.parse_instruction(st, id, insts.len())?;
@@ -1339,9 +1350,12 @@ impl Parser {
                     let bid = st.block(&b);
                     self.expect(Tok::RBracket)?;
                     incoming.push((v, bid));
-                    if !self.eat(&Tok::Comma) {
+                    // A comma followed by `!dbg` starts the metadata
+                    // attachments rather than another incoming pair.
+                    if *self.peek() != Tok::Comma || matches!(self.peek_at(1), Tok::MetaRef(_)) {
                         break;
                     }
+                    self.next();
                 }
                 Ok((ty, InstKind::Phi { incoming }))
             }
@@ -2103,5 +2117,67 @@ define float @f(float %a, float %b) {
         assert!(
             matches!(&f.blocks[0].insts[1].kind, InstKind::Unsupported(op) if op == "atomicrmw")
         );
+    }
+
+    #[test]
+    fn skips_debug_info() {
+        // Debug records (LLVM 19+), `!dbg` attachments on globals, function
+        // definitions and declarations, phis and other instructions, and
+        // `|`-separated DIFlags are all accepted.
+        let src = r#"
+@g = dso_local global i32 0, align 4, !dbg !0
+
+define dso_local i32 @f(i32 noundef %a, i32 noundef %b) #0 !dbg !5 {
+entry:
+    #dbg_value(i32 %a, !9, !DIExpression(), !10)
+    #dbg_declare(ptr %b, !9, !DIExpression(DW_OP_plus_uconst, 4), !10)
+  %add = add nsw i32 %a, %b, !dbg !11
+  switch i32 %add, label %exit [
+    i32 0, label %zero
+  ], !dbg !12
+
+zero:
+  br label %exit, !dbg !12
+
+exit:
+  %r = phi i32 [ %add, %entry ], [ 0, %zero ], !dbg !12
+    #dbg_value(i32 %r, !9, !DIExpression(), !10)
+  ret i32 %r, !dbg !12
+}
+
+declare !dbg !13 dso_local i32 @ext(i32 noundef) #1
+
+attributes #0 = { nounwind }
+attributes #1 = { nocallback nofree nosync nounwind speculatable willreturn memory(none) }
+
+!llvm.dbg.cu = !{!1}
+!llvm.module.flags = !{!3}
+
+!0 = !DIGlobalVariableExpression(var: !2, expr: !DIExpression())
+!1 = distinct !DICompileUnit(language: DW_LANG_C11, file: !4, producer: "clang", isOptimized: true, runtimeVersion: 0, emissionKind: FullDebug, globals: !8, splitDebugInlining: false, nameTableKind: None)
+!2 = distinct !DIGlobalVariable(name: "g", scope: !1, file: !4, line: 1, type: !9, isLocal: false, isDefinition: true)
+!3 = !{i32 2, !"Debug Info Version", i32 3}
+!4 = !DIFile(filename: "x.c", directory: "/tmp", checksumkind: CSK_MD5, checksum: "00000000000000000000000000000000")
+!5 = distinct !DISubprogram(name: "f", scope: !4, file: !4, line: 3, type: !6, scopeLine: 3, flags: DIFlagPrototyped | DIFlagAllCallsDescribed, spFlags: DISPFlagDefinition | DISPFlagOptimized, unit: !1, retainedNodes: !8)
+!6 = !DISubroutineType(types: !7)
+!7 = !{!9, !9, !9}
+!8 = !{!0}
+!9 = !DIBasicType(name: "int", size: 32, encoding: DW_ATE_signed)
+!10 = !DILocation(line: 0, scope: !5)
+!11 = !DILocation(line: 4, column: 5, scope: !5)
+!12 = !DILocation(line: 5, column: 3, scope: !5)
+!13 = !DISubprogram(name: "ext", scope: !4, file: !4, line: 9, type: !6, flags: DIFlagPrototyped, spFlags: DISPFlagOptimized)
+"#;
+        let m = parse_module(src).unwrap();
+        assert_eq!(m.globals.len(), 1);
+        assert_eq!(m.functions.len(), 2);
+        assert!(m.functions[1].is_declaration);
+        let f = &m.functions[0];
+        assert_eq!(f.blocks.len(), 3);
+        assert_eq!(f.blocks[0].insts.len(), 2);
+        assert!(matches!(f.blocks[0].insts[1].kind, InstKind::Switch { .. }));
+        assert_eq!(f.blocks[2].insts.len(), 2);
+        assert!(matches!(f.blocks[2].insts[0].kind, InstKind::Phi { .. }));
+        assert!(matches!(f.blocks[2].insts[1].kind, InstKind::Ret(_)));
     }
 }
