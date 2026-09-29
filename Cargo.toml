@@ -1,0 +1,34 @@
+[package]
+name = "llvm2clif"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.95"
+description = "Translate LLVM IR (.ll) into Cranelift IR and compile it for the Scry ISA"
+repository = "https://github.com/emoun/llvm2clif"
+default-run = "llvm2clif"
+
+[[bin]]
+name = "llvm2clif"
+path = "src/main.rs"
+
+[[bin]]
+name = "scry-cc"
+path = "src/bin/scry_cc.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+env_logger = { version = "0.11", default-features = false }
+
+# Cranelift with the Scry backend, from the Scry project's wasmtime fork.
+cranelift-codegen = { git = "https://github.com/Scry-arch/rust-wasmtime.git", rev = "cfd59dc8e14ebdf35e20a303b161247d96434324", features = ["scry"] }
+cranelift-frontend = { git = "https://github.com/Scry-arch/rust-wasmtime.git", rev = "cfd59dc8e14ebdf35e20a303b161247d96434324" }
+cranelift-module = { git = "https://github.com/Scry-arch/rust-wasmtime.git", rev = "cfd59dc8e14ebdf35e20a303b161247d96434324" }
+cranelift-object = { git = "https://github.com/Scry-arch/rust-wasmtime.git", rev = "cfd59dc8e14ebdf35e20a303b161247d96434324" }
+cranelift-reader = { git = "https://github.com/Scry-arch/rust-wasmtime.git", rev = "cfd59dc8e14ebdf35e20a303b161247d96434324" }
+
+[dev-dependencies]
+cranelift-interpreter = { git = "https://github.com/Scry-arch/rust-wasmtime.git", rev = "cfd59dc8e14ebdf35e20a303b161247d96434324" }
+
+[profile.release]
+debug = false

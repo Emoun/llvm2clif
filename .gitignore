@@ -1,0 +1,7 @@
+/target
+# Intermediate files of local experiments; the checked-in IR and CLIF live
+# under tests/ and docs/.
+*.o
+*.elf
+/*.clif
+/*.ll
