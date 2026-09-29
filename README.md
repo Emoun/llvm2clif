@@ -1,0 +1,270 @@
+# llvm2clif
+
+`llvm2clif` translates LLVM IR into Cranelift IR (CLIF) and compiles it for the
+[Scry](https://github.com/Scry-arch) instruction set using the Scry backend of
+the [Scry-arch/rust-wasmtime](https://github.com/Scry-arch/rust-wasmtime)
+Cranelift fork. Together with clang, LLVM's `opt`, the
+[scry-wild](https://github.com/Scry-arch/scry-wild) linker and the
+[scryer](https://github.com/Scry-arch/scryer) simulator it forms a C compiler
+for Scry without an LLVM backend:
+
+```
+  C source ──clang──▶ LLVM IR ──opt──▶ optimized LLVM IR ──llvm2clif──▶ Scry object ──wild──▶ ELF ──scryer──▶ result
+                                                         (Cranelift IR inside)
+```
+
+The repository provides two programs:
+
+* `llvm2clif` — the translator itself. Reads a textual LLVM IR file (`.ll`)
+  and writes a Scry ELF object file (`--emit obj`, the default), textual
+  Cranelift IR (`--emit clif`) or the Scry machine code as disassembly
+  (`--emit asm`). A `.clif` input is compiled directly.
+* `scry-cc` — a `cc`-like driver that runs the whole pipeline for you.
+
+Everything is written in Rust and runs on Linux, macOS and Windows.
+
+## Installation
+
+### 1. Rust
+
+Install Rust with [rustup](https://rustup.rs) (a recent stable toolchain is
+required; the Scry Cranelift fork needs 1.95 or newer):
+
+```sh
+rustup update stable
+```
+
+### 2. clang and opt (LLVM 15 or newer)
+
+Only the LLVM *tools* are needed, not the LLVM libraries.
+
+* **Ubuntu / Debian:** `sudo apt install clang llvm` (for a specific version
+  e.g. `clang-18 llvm-18`; then use `--clang clang-18 --opt opt-18` or put
+  the versioned tools first on `PATH`). Alternatively use
+  [apt.llvm.org](https://apt.llvm.org).
+* **macOS:** `brew install llvm`, then add `$(brew --prefix llvm)/bin` to
+  `PATH` (Apple's Xcode clang does not ship `opt`).
+* **Windows:** install LLVM from the
+  [GitHub releases](https://github.com/llvm/llvm-project/releases) (the
+  `LLVM-<version>-win64.exe` installer or the `clang+llvm-*-x86_64-pc-windows-msvc.tar.xz`
+  archive, both contain `clang.exe` and `opt.exe`), or `winget install LLVM.LLVM`,
+  and add the `bin` directory to `PATH`.
+
+### 3. The Scry linker and simulator
+
+Both are Rust programs installed with cargo (this compiles them from
+source, which takes a few minutes):
+
+```sh
+cargo install --locked --git https://github.com/Scry-arch/scryer.git scryer
+cargo install --locked --git https://github.com/Scry-arch/scry-wild.git --bin wild wild-linker
+```
+
+Both binaries land in `~/.cargo/bin` (`%USERPROFILE%\.cargo\bin` on Windows),
+which rustup puts on `PATH`.
+
+### 4. llvm2clif and scry-cc
+
+From a clone of this repository:
+
+```sh
+cargo install --path .
+```
+
+This installs `llvm2clif` and `scry-cc` into `~/.cargo/bin`. (Or run them
+from the build directory: `cargo build --release` puts them in
+`target/release/`.) The first build fetches the Scry Cranelift fork from git,
+which is large; be patient.
+
+## Usage
+
+### Compiling and running a C program
+
+```c
+// sum.c
+int sum(const int *p, int n) { int s = 0; for (int i = 0; i < n; i++) s += p[i]; return s; }
+int main(void) { int a[4] = {1, 2, 3, 4}; return sum(a, 4) * 4; }
+```
+
+```sh
+scry-cc sum.c -o sum.elf
+scryer sum.elf --target=scry32-unknown-none-elf
+```
+
+prints the returned operand (`40u32`) and the simulation metrics. With
+`--machine-mode` the simulator instead exits with the program's return value
+as its exit code:
+
+```sh
+scryer sum.elf --target=scry32-unknown-none-elf --machine-mode; echo $?   # 40
+```
+
+`scry-cc --run` does the linking and the simulator invocation in one go;
+arguments after `--` are passed to `scryer`:
+
+```sh
+scry-cc sum.c --run -- --machine-mode
+```
+
+### Passing inputs
+
+Programs on the simulator have no operating system: no `argv`, no I/O. The
+simulator delivers the values given with `-i` to the entry function as its
+arguments, so a program can take its inputs as parameters of `main` (or of
+whatever function is chosen as the entry point with `--entry`):
+
+```c
+int main(int a, int b) { return a * b + 1; }
+```
+
+```sh
+scry-cc mul.c -o mul.elf
+scryer mul.elf --target=scry32-unknown-none-elf -i=6u32 -i=7u32     # 43u32
+```
+
+Values are given with their type; llvm2clif passes and expects all integer
+arguments with an *unsigned* tag (`u32` for `int`), so give negative numbers
+as their two's complement value (`-i=4294967295u32` for `-1`).
+
+### scry-cc options
+
+```
+scry-cc [OPTIONS] <INPUT>... [-- <SIMULATOR ARGS>...]
+  -o <FILE>            Output file (default: <first input>.elf / .o / .clif / .ll)
+  -c                   Compile to object files, do not link
+  --emit-clif          Stop after translation and write textual Cranelift IR
+  --emit-llvm          Stop after optimization and write LLVM IR
+  -O<LEVEL>            Optimization level for clang/opt (0, 1, 2, 3, s, z; default 2)
+  --target <TRIPLE>    Clang target triple (default riscv32-unknown-none-elf)
+  --entry <SYMBOL>     Entry point symbol (default main)
+  --no-runtime         Do not link the bundled runtime library
+  --heap-size <BYTES>  Size of the runtime's malloc heap (default 8192)
+  --no-gc-sections     Keep unreferenced sections when linking
+  --skip-unsupported   Skip functions using unsupported constructs (warning)
+  --native-signed-ops  Do not rewrite signed compares/shifts into unsigned ones
+  -Wl,<ARG>            Pass <ARG> to the linker
+  --run                Run the linked program on the simulator
+  --clang/--opt/--wild/--scryer <PATH>   Tool locations (or SCRY_CLANG, SCRY_OPT,
+                       SCRY_WILD, SCRY_SCRYER environment variables; default: PATH)
+  --keep-temps         Keep intermediate files (.pre.ll, .ll, .o)
+  -v, --verbose        Print the commands that are run
+```
+
+Other options starting with `-` (`-I`, `-D`, `-std=`, `-W...`, ...) are passed
+through to clang. Inputs may be C sources (`.c`), LLVM IR (`.ll`) or Scry
+objects (`.o`); several inputs are linked together.
+
+`scry-cc` compiles C with `--target=riscv32-unknown-none-elf`: a 32-bit
+little-endian ILP32 target whose data layout matches Scry (32-bit pointers,
+`int`/`long` 32 bits, `long long` 64 bits). Plain `char` is made signed
+(`-fsigned-char`, like on x86) unless you pass `-funsigned-char`.
+
+### The runtime library
+
+Freestanding programs cannot use a C library. `scry-cc` bundles a small one
+(see `runtime/scryrt.c`) that is compiled through the same pipeline and linked
+into every program (`--no-runtime` disables it): `memcpy`, `memmove`,
+`memset`, `memcmp`, `strlen`, `strcmp`, `strncmp`, `strcpy`, `strncpy`,
+`strcat`, `strchr`, `abs`, a bump allocator (`malloc`, `calloc`, `realloc`,
+`free` as a no-op) and `abort`. Its headers `<string.h>` and `<stdlib.h>` are
+provided; `<stdint.h>`, `<stddef.h>`, `<stdbool.h>` and `<limits.h>` come
+with clang. The compiler also emits calls to `memcpy`/`memset`/`memmove` on its
+own for large copies, so keep the runtime unless you provide these yourself.
+
+### Using llvm2clif directly
+
+```sh
+clang --target=riscv32-unknown-none-elf -march=rv32im -mabi=ilp32 -O2 -fsigned-char \
+      -S -emit-llvm -Xclang -disable-llvm-passes -o prog.pre.ll prog.c
+opt -O2 -S -o prog.ll prog.pre.ll
+llvm2clif prog.ll -o prog.o                 # Scry object file
+llvm2clif prog.ll --emit clif -o prog.clif  # Cranelift IR, for inspection
+llvm2clif prog.ll --emit asm -o prog.s      # Scry code as the backend disassembles it
+wild -m elf32scry -e main -z noexecstack --gc-sections -o prog.elf prog.o
+scryer prog.elf --target=scry32-unknown-none-elf
+```
+
+`llvm2clif` prints an error naming the function and source line when it meets
+something it cannot translate; `--skip-unsupported` turns that into a warning
+and drops the function.
+
+## What is supported
+
+LLVM IR as produced by clang/opt for C, restricted to what the Scry backend
+can execute:
+
+* Integer types `i1`…`i64` (widths other than 8/16/32/64 are emulated in the
+  next larger type), pointers (32 bits), structs and arrays (as values,
+  flattened; in memory with the target data layout, including bit-fields and
+  packed structs).
+* All integer arithmetic, bitwise and shift instructions, comparisons,
+  `select`, casts, `phi`, `br`, `switch` (dense switches become jump tables),
+  `unreachable`, `alloca` with constant size, `load`/`store`,
+  `getelementptr`, direct and indirect calls (including functions with more
+  than four arguments and multiple/aggregate return values), `byval`
+  arguments, `extractvalue`/`insertvalue`, `freeze`.
+* Global variables and constants with initializers (including pointers to
+  other globals and functions, and constant expressions), string literals,
+  function aliases.
+* Intrinsics: `memcpy`/`memmove`/`memset` (expanded inline up to 64 bytes,
+  otherwise calls into the runtime), `lifetime`/`dbg`/`assume` markers,
+  `expect`, `trap`/`debugtrap`/`ubsantrap`, `abs`, `smax`/`smin`/`umax`/`umin`,
+  `bswap`, `ctpop`, `ctlz`, `cttz`, `bitreverse`, `fshl`/`fshr`,
+  `sadd/uadd/ssub/usub/smul/umul.with.overflow`, `sadd/uadd/ssub/usub.sat`,
+  `scmp`/`ucmp`, `objectsize`, `is.constant`, `ptrmask`.
+
+Not supported (reported as errors, or skipped with `--skip-unsupported`):
+floating point, vector types, integers wider than 64 bits, variadic
+functions (`va_arg`), variable-length arrays and other dynamic `alloca`,
+exceptions (`invoke`/`landingpad`), atomics beyond plain loads/stores,
+`blockaddress` (computed goto), inline assembly, thread-local storage,
+`fence`. Since there is no operating system, there is no `printf`, file or
+console I/O: programs communicate through their return value and the
+simulator's `-i` inputs.
+
+### Simulator limits
+
+`scryer` maps the program at address 0 and places the stack at address
+0x10000 with 4 KiB of stack memory, so a program image (code + data) must stay
+below 64 KiB and deep recursion or large local arrays overflow the stack.
+
+## Known issues in the Scry backend and simulator
+
+Several programs that translate correctly still misbehave on the simulator
+because of bugs in the Scry Cranelift backend and in `scryer`. They are
+described, with minimal reproducers, in
+[docs/backend-issues/README.md](docs/backend-issues/README.md). The most
+important one (`echo.l` forwarding every queued operand) affects most
+non-trivial functions. `llvm2clif` contains workarounds for the issues that
+could be worked around (unsigned rewrites of signed operations, explicit zero
+bytes instead of `.bss`); the affected end-to-end tests are marked as known
+failures until the backend is fixed.
+
+## Tests
+
+```sh
+cargo test                      # parser, translator and interpreter tests (no external tools)
+cargo test --test e2e           # end-to-end tests on scryer (needs clang, opt, wild, scryer)
+```
+
+`tests/programs/*.c` are C programs with `// CASES: a b c d => result` lines
+(expected results computed natively by `tests/programs/update_expected.py`).
+`tests/interp.rs` translates their checked-in LLVM IR (`tests/programs/ll/`,
+regenerated by `update_ll.py`) and runs the result in Cranelift's interpreter,
+which validates the translation without the Scry backend. `tests/e2e.rs` runs
+the same programs through the whole toolchain on the simulator; set
+`LLVM2CLIF_REQUIRE_TOOLS=1` to make missing tools an error instead of a skip.
+
+## Layout
+
+```
+src/llvm/        LLVM IR lexer, parser, IR data structures, data layout
+src/translate/   translation to Cranelift IR (types, functions, intrinsics, globals)
+src/emit.rs      CLIF text, Scry assembly and object file output
+src/driver.rs    the scry-cc pipeline
+src/main.rs      llvm2clif command line
+src/bin/         scry-cc command line
+runtime/         the bundled C runtime library and its headers
+tests/           test programs and harnesses
+docs/            backend issue reproducers
+```

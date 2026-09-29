@@ -1,0 +1,364 @@
+; Reproducer for the compile-time hang on 64-bit code (see README.md in this
+; directory): `llvm2clif i64_compile_hang.clif -o out.o` does not terminate.
+; This is the translation of tests/programs/int64.c.
+
+function %test(i32 uext, i32 uext, i32 uext, i32 uext) -> i32 uext system_v {
+block0(v0: i32, v1: i32, v2: i32, v3: i32):
+    v4 = uextend.i64 v0
+    v5 = iconst.i64 32
+    v6 = ishl v4, v5  ; v5 = 32
+    v7 = iconst.i64 -9223372036854775808
+    v8 = bxor v6, v7  ; v7 = -9223372036854775808
+    v9 = ushr v8, v5  ; v5 = 32
+    v10 = iconst.i64 -9223372036854775808
+    v11 = ushr v10, v5  ; v10 = -9223372036854775808, v5 = 32
+    v12 = isub v9, v11
+    v13 = uextend.i64 v1
+    v14 = iconst.i64 32
+    v15 = ishl v13, v14  ; v14 = 32
+    v16 = iconst.i64 -9223372036854775808
+    v17 = bxor v15, v16  ; v16 = -9223372036854775808
+    v18 = ushr v17, v14  ; v14 = 32
+    v19 = iconst.i64 -9223372036854775808
+    v20 = ushr v19, v14  ; v19 = -9223372036854775808, v14 = 32
+    v21 = isub v18, v20
+    v22 = imul v21, v12
+    v23 = uextend.i64 v2
+    v24 = iconst.i64 32
+    v25 = ishl v23, v24  ; v24 = 32
+    v26 = iconst.i64 -9223372036854775808
+    v27 = bxor v25, v26  ; v26 = -9223372036854775808
+    v28 = ushr v27, v24  ; v24 = 32
+    v29 = iconst.i64 -9223372036854775808
+    v30 = ushr v29, v24  ; v29 = -9223372036854775808, v24 = 32
+    v31 = isub v28, v30
+    v32 = iadd v22, v31
+    v33 = uextend.i64 v0
+    v34 = iconst.i64 0x0001_0000_000f
+    v35 = imul v33, v34  ; v34 = 0x0001_0000_000f
+    v36 = uextend.i64 v1
+    v37 = iadd v35, v36
+    v38 = iconst.i64 7
+    v39 = ishl v32, v38  ; v38 = 7
+    v40 = iconst.i64 3
+    v41 = iconst.i64 -9223372036854775808
+    v42 = bxor v39, v41  ; v41 = -9223372036854775808
+    v43 = ushr v42, v40  ; v40 = 3
+    v44 = iconst.i64 -9223372036854775808
+    v45 = ushr v44, v40  ; v44 = -9223372036854775808, v40 = 3
+    v46 = isub v43, v45
+    v47 = iconst.i64 5
+    v48 = ushr v37, v47  ; v47 = 5
+    v49 = iadd v46, v48
+    v50 = iconst.i64 13
+    v51 = ushr v37, v50  ; v50 = 13
+    v52 = bxor v51, v37
+    v53 = iconst.i64 -7046029254386353131
+    v54 = imul v52, v53  ; v53 = -7046029254386353131
+    v55 = iconst.i64 0x0001_0000_0001
+    v56 = imul v31, v55  ; v55 = 0x0001_0000_0001
+    v57 = iconst.i64 13
+    v58 = ushr v56, v57  ; v57 = 13
+    v59 = bxor v58, v56
+    v60 = iconst.i64 -7046029254386353131
+    v61 = imul v59, v60  ; v60 = -7046029254386353131
+    v62 = bxor v61, v54
+    v63 = iconst.i64 29
+    v64 = ushr v62, v63  ; v63 = 29
+    v65 = bxor v54, v64
+    v66 = bxor v65, v61
+    v67 = ireduce.i32 v32
+    v68 = iconst.i32 0xffff
+    v69 = band v67, v68  ; v68 = 0xffff
+    v70 = iconst.i64 32
+    v71 = ushr v32, v70  ; v70 = 32
+    v72 = ireduce.i32 v71
+    v73 = iadd v69, v72
+    v74 = iconst.i64 1000
+    v75 = srem v49, v74  ; v74 = 1000
+    v76 = ireduce.i32 v75
+    v77 = iadd v73, v76
+    v78 = iconst.i64 1000
+    v79 = urem v66, v78  ; v78 = 1000
+    v80 = ireduce.i32 v79
+    v81 = iadd v77, v80
+    v82 = iconst.i64 -9223372036854775808
+    v83 = bxor v32, v82  ; v82 = -9223372036854775808
+    v84 = iconst.i64 -9223372036854775808
+    v85 = bxor v39, v84  ; v84 = -9223372036854775808
+    v86 = icmp ult v83, v85
+    v87 = iconst.i32 0x2710
+    v88 = iadd v81, v87  ; v87 = 0x2710
+    v89 = select v86, v88, v81
+    v90 = uextend.i64 v3
+    v91 = iconst.i64 32
+    v92 = ishl v90, v91  ; v91 = 32
+    v93 = iconst.i64 -9223372036854775808
+    v94 = bxor v92, v93  ; v93 = -9223372036854775808
+    v95 = ushr v94, v91  ; v91 = 32
+    v96 = iconst.i64 -9223372036854775808
+    v97 = ushr v96, v91  ; v96 = -9223372036854775808, v91 = 32
+    v98 = isub v95, v97
+    v99 = icmp ugt v37, v98
+    v100 = iconst.i32 0x4e20
+    v101 = iadd v89, v100  ; v100 = 0x4e20
+    v102 = select v99, v101, v89
+    v103 = iconst.i64 3
+    v104 = udiv v32, v103  ; v103 = 3
+    v105 = iconst.i64 100
+    v106 = urem v104, v105  ; v105 = 100
+    v107 = ireduce.i32 v106
+    v108 = iconst.i32 5
+    v109 = iadd v1, v108  ; v108 = 5
+    v110 = uextend.i64 v109
+    v111 = iconst.i64 32
+    v112 = ishl v110, v111  ; v111 = 32
+    v113 = iconst.i64 -9223372036854775808
+    v114 = bxor v112, v113  ; v113 = -9223372036854775808
+    v115 = ushr v114, v111  ; v111 = 32
+    v116 = iconst.i64 -9223372036854775808
+    v117 = ushr v116, v111  ; v116 = -9223372036854775808, v111 = 32
+    v118 = isub v115, v117
+    v119 = sdiv v32, v118
+    v120 = iconst.i64 100
+    v121 = srem v119, v120  ; v120 = 100
+    v122 = ireduce.i32 v121
+    v123 = iconst.i64 7
+    v124 = urem v37, v123  ; v123 = 7
+    v125 = ireduce.i32 v124
+    v126 = iconst.i64 60
+    v127 = ushr v66, v126  ; v126 = 60
+    v128 = ireduce.i32 v127
+    v129 = ireduce.i32 v37
+    v130 = iconst.i64 32
+    v131 = ushr v37, v130  ; v130 = 32
+    v132 = ireduce.i32 v131
+    v133 = iconst.i32 1
+    v134 = iconst.i32 0x5555_5555
+    v135 = ushr v129, v133  ; v133 = 1
+    v136 = band v135, v134  ; v134 = 0x5555_5555
+    v137 = isub v129, v136
+    v138 = iconst.i32 2
+    v139 = iconst.i32 0x3333_3333
+    v140 = band v137, v139  ; v139 = 0x3333_3333
+    v141 = ushr v137, v138  ; v138 = 2
+    v142 = band v141, v139  ; v139 = 0x3333_3333
+    v143 = iadd v140, v142
+    v144 = iconst.i32 4
+    v145 = iconst.i32 0x0f0f_0f0f
+    v146 = ushr v143, v144  ; v144 = 4
+    v147 = iadd v143, v146
+    v148 = band v147, v145  ; v145 = 0x0f0f_0f0f
+    v149 = iconst.i32 0x0101_0101
+    v150 = imul v148, v149  ; v149 = 0x0101_0101
+    v151 = iconst.i32 24
+    v152 = ushr v150, v151  ; v151 = 24
+    v153 = iconst.i32 1
+    v154 = iconst.i32 0x5555_5555
+    v155 = ushr v132, v153  ; v153 = 1
+    v156 = band v155, v154  ; v154 = 0x5555_5555
+    v157 = isub v132, v156
+    v158 = iconst.i32 2
+    v159 = iconst.i32 0x3333_3333
+    v160 = band v157, v159  ; v159 = 0x3333_3333
+    v161 = ushr v157, v158  ; v158 = 2
+    v162 = band v161, v159  ; v159 = 0x3333_3333
+    v163 = iadd v160, v162
+    v164 = iconst.i32 4
+    v165 = iconst.i32 0x0f0f_0f0f
+    v166 = ushr v163, v164  ; v164 = 4
+    v167 = iadd v163, v166
+    v168 = band v167, v165  ; v165 = 0x0f0f_0f0f
+    v169 = iconst.i32 0x0101_0101
+    v170 = imul v168, v169  ; v169 = 0x0101_0101
+    v171 = iconst.i32 24
+    v172 = ushr v170, v171  ; v171 = 24
+    v173 = iadd v152, v172
+    v174 = uextend.i64 v173
+    v175 = ireduce.i32 v174
+    v176 = iconst.i64 1
+    v177 = bor v37, v176  ; v176 = 1
+    v178 = ireduce.i32 v177
+    v179 = iconst.i64 32
+    v180 = ushr v177, v179  ; v179 = 32
+    v181 = ireduce.i32 v180
+    v182 = iconst.i32 0
+    v183 = iconst.i32 0
+    v184 = iconst.i32 16
+    v185 = ushr v178, v184  ; v184 = 16
+    v186 = icmp eq v185, v183  ; v183 = 0
+    v187 = iconst.i32 16
+    v188 = select v186, v187, v183  ; v187 = 16, v183 = 0
+    v189 = iadd v182, v188  ; v182 = 0
+    v190 = ishl v178, v187  ; v187 = 16
+    v191 = select v186, v190, v178
+    v192 = iconst.i32 24
+    v193 = ushr v191, v192  ; v192 = 24
+    v194 = icmp eq v193, v183  ; v183 = 0
+    v195 = iconst.i32 8
+    v196 = select v194, v195, v183  ; v195 = 8, v183 = 0
+    v197 = iadd v189, v196
+    v198 = ishl v191, v195  ; v195 = 8
+    v199 = select v194, v198, v191
+    v200 = iconst.i32 28
+    v201 = ushr v199, v200  ; v200 = 28
+    v202 = icmp eq v201, v183  ; v183 = 0
+    v203 = iconst.i32 4
+    v204 = select v202, v203, v183  ; v203 = 4, v183 = 0
+    v205 = iadd v197, v204
+    v206 = ishl v199, v203  ; v203 = 4
+    v207 = select v202, v206, v199
+    v208 = iconst.i32 30
+    v209 = ushr v207, v208  ; v208 = 30
+    v210 = icmp eq v209, v183  ; v183 = 0
+    v211 = iconst.i32 2
+    v212 = select v210, v211, v183  ; v211 = 2, v183 = 0
+    v213 = iadd v205, v212
+    v214 = ishl v207, v211  ; v211 = 2
+    v215 = select v210, v214, v207
+    v216 = iconst.i32 31
+    v217 = ushr v215, v216  ; v216 = 31
+    v218 = icmp eq v217, v183  ; v183 = 0
+    v219 = iconst.i32 1
+    v220 = select v218, v219, v183  ; v219 = 1, v183 = 0
+    v221 = iadd v213, v220
+    v222 = ishl v215, v219  ; v219 = 1
+    v223 = select v218, v222, v215
+    v224 = iconst.i32 31
+    v225 = ushr v223, v224  ; v224 = 31
+    v226 = iconst.i32 1
+    v227 = isub v226, v225  ; v226 = 1
+    v228 = iadd v221, v227
+    v229 = iconst.i32 0
+    v230 = iconst.i32 0
+    v231 = iconst.i32 16
+    v232 = ushr v181, v231  ; v231 = 16
+    v233 = icmp eq v232, v230  ; v230 = 0
+    v234 = iconst.i32 16
+    v235 = select v233, v234, v230  ; v234 = 16, v230 = 0
+    v236 = iadd v229, v235  ; v229 = 0
+    v237 = ishl v181, v234  ; v234 = 16
+    v238 = select v233, v237, v181
+    v239 = iconst.i32 24
+    v240 = ushr v238, v239  ; v239 = 24
+    v241 = icmp eq v240, v230  ; v230 = 0
+    v242 = iconst.i32 8
+    v243 = select v241, v242, v230  ; v242 = 8, v230 = 0
+    v244 = iadd v236, v243
+    v245 = ishl v238, v242  ; v242 = 8
+    v246 = select v241, v245, v238
+    v247 = iconst.i32 28
+    v248 = ushr v246, v247  ; v247 = 28
+    v249 = icmp eq v248, v230  ; v230 = 0
+    v250 = iconst.i32 4
+    v251 = select v249, v250, v230  ; v250 = 4, v230 = 0
+    v252 = iadd v244, v251
+    v253 = ishl v246, v250  ; v250 = 4
+    v254 = select v249, v253, v246
+    v255 = iconst.i32 30
+    v256 = ushr v254, v255  ; v255 = 30
+    v257 = icmp eq v256, v230  ; v230 = 0
+    v258 = iconst.i32 2
+    v259 = select v257, v258, v230  ; v258 = 2, v230 = 0
+    v260 = iadd v252, v259
+    v261 = ishl v254, v258  ; v258 = 2
+    v262 = select v257, v261, v254
+    v263 = iconst.i32 31
+    v264 = ushr v262, v263  ; v263 = 31
+    v265 = icmp eq v264, v230  ; v230 = 0
+    v266 = iconst.i32 1
+    v267 = select v265, v266, v230  ; v266 = 1, v230 = 0
+    v268 = iadd v260, v267
+    v269 = ishl v262, v266  ; v266 = 1
+    v270 = select v265, v269, v262
+    v271 = iconst.i32 31
+    v272 = ushr v270, v271  ; v271 = 31
+    v273 = iconst.i32 1
+    v274 = isub v273, v272  ; v273 = 1
+    v275 = iadd v268, v274
+    v276 = iconst.i32 0
+    v277 = icmp eq v181, v276  ; v276 = 0
+    v278 = iconst.i32 32
+    v279 = iadd v228, v278  ; v278 = 32
+    v280 = select v277, v279, v275
+    v281 = iconst.i32 0
+    v282 = isub v280, v281  ; v281 = 0
+    v283 = uextend.i64 v282
+    v284 = ireduce.i32 v283
+    v285 = iconst.i64 0x0010_0000_0000
+    v286 = bor v37, v285  ; v285 = 0x0010_0000_0000
+    v287 = ireduce.i32 v286
+    v288 = iconst.i64 32
+    v289 = ushr v286, v288  ; v288 = 32
+    v290 = ireduce.i32 v289
+    v291 = ineg v287
+    v292 = band v287, v291
+    v293 = iconst.i32 1
+    v294 = isub v292, v293  ; v293 = 1
+    v295 = iconst.i32 1
+    v296 = iconst.i32 0x5555_5555
+    v297 = ushr v294, v295  ; v295 = 1
+    v298 = band v297, v296  ; v296 = 0x5555_5555
+    v299 = isub v294, v298
+    v300 = iconst.i32 2
+    v301 = iconst.i32 0x3333_3333
+    v302 = band v299, v301  ; v301 = 0x3333_3333
+    v303 = ushr v299, v300  ; v300 = 2
+    v304 = band v303, v301  ; v301 = 0x3333_3333
+    v305 = iadd v302, v304
+    v306 = iconst.i32 4
+    v307 = iconst.i32 0x0f0f_0f0f
+    v308 = ushr v305, v306  ; v306 = 4
+    v309 = iadd v305, v308
+    v310 = band v309, v307  ; v307 = 0x0f0f_0f0f
+    v311 = iconst.i32 0x0101_0101
+    v312 = imul v310, v311  ; v311 = 0x0101_0101
+    v313 = iconst.i32 24
+    v314 = ushr v312, v313  ; v313 = 24
+    v315 = ineg v290
+    v316 = band v290, v315
+    v317 = iconst.i32 1
+    v318 = isub v316, v317  ; v317 = 1
+    v319 = iconst.i32 1
+    v320 = iconst.i32 0x5555_5555
+    v321 = ushr v318, v319  ; v319 = 1
+    v322 = band v321, v320  ; v320 = 0x5555_5555
+    v323 = isub v318, v322
+    v324 = iconst.i32 2
+    v325 = iconst.i32 0x3333_3333
+    v326 = band v323, v325  ; v325 = 0x3333_3333
+    v327 = ushr v323, v324  ; v324 = 2
+    v328 = band v327, v325  ; v325 = 0x3333_3333
+    v329 = iadd v326, v328
+    v330 = iconst.i32 4
+    v331 = iconst.i32 0x0f0f_0f0f
+    v332 = ushr v329, v330  ; v330 = 4
+    v333 = iadd v329, v332
+    v334 = band v333, v331  ; v331 = 0x0f0f_0f0f
+    v335 = iconst.i32 0x0101_0101
+    v336 = imul v334, v335  ; v335 = 0x0101_0101
+    v337 = iconst.i32 24
+    v338 = ushr v336, v337  ; v337 = 24
+    v339 = iconst.i32 0
+    v340 = icmp eq v287, v339  ; v339 = 0
+    v341 = iconst.i32 32
+    v342 = iadd v338, v341  ; v341 = 32
+    v343 = select v340, v342, v314
+    v344 = iconst.i32 64
+    v345 = umin v343, v344  ; v344 = 64
+    v346 = uextend.i64 v345
+    v347 = ireduce.i32 v346
+    v348 = ireduce.i32 v37
+    v349 = iconst.i32 255
+    v350 = band v348, v349  ; v349 = 255
+    v351 = iadd v125, v175
+    v352 = iadd v351, v350
+    v353 = iadd v352, v284
+    v354 = iadd v353, v347
+    v355 = iadd v354, v107
+    v356 = iadd v355, v128
+    v357 = iadd v356, v102
+    v358 = iadd v357, v122
+    return v358
+}
+

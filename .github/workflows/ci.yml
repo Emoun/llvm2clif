@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  # The Scry cranelift fork needs a recent stable toolchain.
+  RUST_TOOLCHAIN: stable
+
+jobs:
+  # Build llvm2clif and run the tests that need no external tools (parser,
+  # translator unit tests and the interpreter-based program tests).
+  build-and-test:
+    name: Build & test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Format check
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+      - name: Build
+        run: cargo build --release
+      - name: Unit and interpreter tests
+        run: cargo test --release
+
+  # The full pipeline: clang/opt -> llvm2clif -> wild -> scryer.
+  end-to-end:
+    name: End-to-end on scryer (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install LLVM (clang and opt)
+        uses: KyleMayes/install-llvm-action@v2
+        with:
+          version: "18"
+      - name: Install the Scry simulator and linker
+        shell: bash
+        run: |
+          cargo install --locked --git https://github.com/Scry-arch/scryer.git --rev 6fc6ac9d8fa452d306049692bd8ac1ab02c2e69e scryer
+          cargo install --locked --git https://github.com/Scry-arch/scry-wild.git --rev 2b9f2b4d754428f3a8c0f5b76ff762fd9615a7ad --bin wild wild-linker
+      - name: Build
+        run: cargo build --release
+      - name: End-to-end tests
+        shell: bash
+        env:
+          LLVM2CLIF_REQUIRE_TOOLS: "1"
+        run: cargo test --release --test e2e -- --nocapture

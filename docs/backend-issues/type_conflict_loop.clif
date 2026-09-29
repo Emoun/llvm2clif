@@ -1,0 +1,43 @@
+function %f9(i32 uext, i32 uext) -> i32 uext system_v {
+block0(v0: i32, v1: i32):
+    v6 = iconst.i32 0
+    v7 = icmp sgt v1, v6  ; v6 = 0
+    v8 = iconst.i32 0
+    v9 = iconst.i32 -1
+    v10 = iconst.i32 -1
+    brif v7, block3(v8, v9), block4(v10)  ; v8 = 0, v9 = -1, v10 = -1
+
+block3(v2: i32, v3: i32):
+    v11 = iconst.i32 2
+    v12 = ishl v2, v11  ; v11 = 2
+    v13 = iadd.i32 v0, v12
+    v14 = load.i32 notrap v13
+    v15 = smax v14, v3
+    v16 = iconst.i32 1
+    v17 = iadd v2, v16  ; v16 = 1
+    v18 = icmp eq v17, v1
+    brif v18, block1, block3(v17, v15)
+
+block1:
+    brif.i8 v7, block2, block4(v15)
+
+block2:
+    v19 = iconst.i32 1
+    v20 = sshr.i32 v15, v19  ; v19 = 1
+    jump block5(v1)
+
+block5(v5: i32):
+    v21 = iconst.i32 -1
+    v22 = iadd v5, v21  ; v21 = -1
+    v23 = iconst.i32 2
+    v24 = ishl v22, v23  ; v23 = 2
+    v25 = iadd.i32 v0, v24
+    store.i32 notrap v20, v25
+    v26 = iconst.i32 1
+    v27 = icmp ugt v5, v26  ; v26 = 1
+    brif v27, block5(v22), block4(v15)
+
+block4(v4: i32):
+    return v4
+}
+

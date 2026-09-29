@@ -1,0 +1,119 @@
+function %test(i32 uext, i32 uext, i32 uext, i32 uext) -> i32 uext system_v {
+block0(v0: i32, v1: i32, v2: i32, v3: i32):
+    v4 = iconst.i32 -2147483648
+    v5 = bxor v0, v4  ; v4 = -2147483648
+    v6 = iconst.i32 -2147483648
+    v7 = bxor v1, v6  ; v6 = -2147483648
+    v8 = icmp ult v5, v7
+    v9 = uextend.i32 v8
+    v10 = iconst.i32 -2147483648
+    v11 = bxor v0, v10  ; v10 = -2147483648
+    v12 = iconst.i32 -2147483648
+    v13 = bxor v1, v12  ; v12 = -2147483648
+    v14 = icmp ugt v11, v13
+    v15 = iconst.i32 0
+    v16 = iconst.i32 2
+    v17 = select v14, v15, v16  ; v15 = 0, v16 = 2
+    v18 = iconst.i32 4
+    v19 = iconst.i32 0
+    v20 = select v14, v18, v19  ; v18 = 4, v19 = 0
+    v21 = iconst.i32 0
+    v22 = iconst.i32 8
+    v23 = select v8, v21, v22  ; v21 = 0, v22 = 8
+    v24 = icmp eq v0, v1
+    v25 = iconst.i32 16
+    v26 = iconst.i32 0
+    v27 = select v24, v25, v26  ; v25 = 16, v26 = 0
+    v28 = iconst.i32 0
+    v29 = iconst.i32 32
+    v30 = select v24, v28, v29  ; v28 = 0, v29 = 32
+    v31 = icmp ult v0, v1
+    v32 = iconst.i32 64
+    v33 = iconst.i32 0
+    v34 = select v31, v32, v33  ; v32 = 64, v33 = 0
+    v35 = icmp ugt v0, v1
+    v36 = iconst.i32 128
+    v37 = iconst.i32 0
+    v38 = select v35, v36, v37  ; v36 = 128, v37 = 0
+    v39 = iconst.i32 0
+    v40 = iconst.i32 256
+    v41 = select v35, v39, v40  ; v39 = 0, v40 = 256
+    v42 = iconst.i32 0
+    v43 = iconst.i32 512
+    v44 = select v31, v42, v43  ; v42 = 0, v43 = 512
+    v45 = iconst.i32 -2147483648
+    v46 = bxor v2, v45  ; v45 = -2147483648
+    v47 = iconst.i32 -2147483648
+    v48 = bxor v3, v47  ; v47 = -2147483648
+    v49 = icmp ult v46, v48
+    v50 = select v49, v2, v3
+    v51 = iconst.i32 3
+    v52 = imul v50, v51  ; v51 = 3
+    v53 = iconst.i32 -2147483648
+    v54 = bxor v2, v53  ; v53 = -2147483648
+    v55 = iconst.i32 -2147483648
+    v56 = bxor v3, v55  ; v55 = -2147483648
+    v57 = icmp ugt v54, v56
+    v58 = select v57, v2, v3
+    v59 = iconst.i32 5
+    v60 = imul v58, v59  ; v59 = 5
+    v61 = band v1, v0
+    v62 = iconst.i32 21
+    v63 = ushr v61, v62  ; v62 = 21
+    v64 = iconst.i32 1024
+    v65 = band v63, v64  ; v64 = 1024
+    v66 = bor v1, v0
+    v67 = iconst.i32 20
+    v68 = ushr v66, v67  ; v67 = 20
+    v69 = iconst.i32 2048
+    v70 = band v68, v69  ; v69 = 2048
+    v71 = bxor v1, v0
+    v72 = iconst.i32 19
+    v73 = ushr v71, v72  ; v72 = 19
+    v74 = iconst.i32 4096
+    v75 = band v73, v74  ; v74 = 4096
+    v76 = iconst.i32 18
+    v77 = ushr v0, v76  ; v76 = 18
+    v78 = iconst.i32 8192
+    v79 = band v77, v78  ; v78 = 8192
+    v80 = iconst.i32 8192
+    v81 = bxor v79, v80  ; v80 = 8192
+    v82 = iconst.i32 24
+    v83 = ishl v0, v82  ; v82 = 24
+    v84 = iconst.i32 24
+    v85 = ishl v1, v84  ; v84 = 24
+    v86 = iconst.i32 -2147483648
+    v87 = bxor v83, v86  ; v86 = -2147483648
+    v88 = iconst.i32 -2147483648
+    v89 = bxor v85, v88  ; v88 = -2147483648
+    v90 = icmp ult v87, v89
+    v91 = iconst.i32 0x4000
+    v92 = iconst.i32 0
+    v93 = select v90, v91, v92  ; v91 = 0x4000, v92 = 0
+    v94 = iconst.i32 255
+    v95 = band v2, v94  ; v94 = 255
+    v96 = iconst.i32 100
+    v97 = icmp ugt v95, v96  ; v96 = 100
+    v98 = iconst.i32 0x8000
+    v99 = iconst.i32 0
+    v100 = select v97, v98, v99  ; v98 = 0x8000, v99 = 0
+    v101 = bor v17, v9
+    v102 = bor v101, v20
+    v103 = bor v102, v23
+    v104 = bor v103, v27
+    v105 = bor v104, v30
+    v106 = bor v105, v34
+    v107 = iadd v106, v38
+    v108 = iadd v107, v41
+    v109 = iadd v108, v44
+    v110 = iadd v109, v81
+    v111 = iadd v110, v65
+    v112 = iadd v111, v70
+    v113 = iadd v112, v75
+    v114 = iadd v113, v93
+    v115 = iadd v114, v52
+    v116 = iadd v115, v60
+    v117 = iadd v116, v100
+    return v117
+}
+
