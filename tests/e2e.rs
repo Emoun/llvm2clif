@@ -30,7 +30,14 @@ const KNOWN_BACKEND_FAILURES: &[(&str, &str)] = &[
     ("memops", "1 (echo.l routing)"),
     ("recursion", "1 (echo.l routing)"),
     ("sort", "1 (echo.l routing)"),
-    ("int64", "5 (backend hangs compiling 64-bit code)"),
+    (
+        "int64",
+        "5 (backend compile time explodes on large straight-line functions)",
+    ),
+    (
+        "int64_ops",
+        "5 (backend compile time explodes on large straight-line functions)",
+    ),
 ];
 
 struct Tools {

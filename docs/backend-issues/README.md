@@ -83,17 +83,63 @@ specification the tail of a segment beyond `p_filesz` is zero-filled.
 **Workaround in llvm2clif:** zero-initialized data is emitted as explicit
 zero bytes, so it lands in `.data` instead of `.bss`.
 
-## 4. Notes on `i64`
+## 4. No 64-bit values
 
-`i64` values, arithmetic, division, shifts and memory accesses work in the
-backend and the simulator, so llvm2clif maps LLVM `i64` to Cranelift `i64`
-(needed anyway: `opt` merges adjacent 32-bit stores into 64-bit ones).
+The backend does not support 64-bit values yet, so llvm2clif never emits
+`i64` (or any Cranelift type wider than `i32`): LLVM integers of 33 to 128
+bits are lowered to 32-bit parts by the translator (`src/translate/wide.rs`),
+and 64-bit division goes through a helper function that llvm2clif adds to
+each object file. (An earlier revision of these notes reported `i64` as
+working because small cases compiled and ran; that mapping is no longer
+used.)
 
-## 5. Compile-time hang on a function with many 64-bit operations
+## 5. Compile time explodes with the size of a straight-line function
 
-**Reproducer:** `i64_compile_hang.clif` (the translation of
-`tests/programs/int64.c`): `llvm2clif i64_compile_hang.clif -o out.o` spins
-forever in the backend (100 % CPU, no output). Each of the 64-bit operations
-in the function compiles and runs correctly on its own (the translator's
-tests cover them in the interpreter, and most of them were also checked on the
-simulator), so the hang is triggered by their combination in one function.
+**Reproducers:** `compile_cliff_13.clif` and `compile_cliff_14.clif`, the
+translations of a function with 13 and 14 chained `unsigned long long`
+multiply/shift/add statements (`compile_cliff_14.c` is the 14-statement
+source; the two differ by one statement). Both are a single basic block of
+32-bit instructions only.
+
+```sh
+llvm2clif docs/backend-issues/compile_cliff_13.clif -o ok.o    # about 3 s
+llvm2clif docs/backend-issues/compile_cliff_14.clif -o hang.o  # never finishes
+```
+
+Compile times of the same function for a growing number of statements
+(release build; the 32-bit version of the function, with `unsigned` instead
+of `unsigned long long`, compiles in 0.05 s for 80 statements):
+
+| statements | instructions | compile time |
+|-----------:|-------------:|-------------:|
+| 5          | 247          | 0.28 s       |
+| 10         | 457          | 1.45 s       |
+| 11         | 499          | 1.87 s       |
+| 12         | 541          | 2.37 s       |
+| 13         | 583          | 2.87 s       |
+| 14         | 625          | > 2 minutes  |
+
+The time is spent inside `ScryBackend::compile_function`
+(`cranelift/codegen/src/isa/scry/mod.rs`) itself, not in lowering or
+register allocation: a backtrace taken while it spins is
+
+```
+#0  __memset_avx512_unaligned_erms
+#1  hashbrown::raw::RawTableInner::fallible_with_capacity
+#2  hashbrown::raw::RawTable<(usize, u16)>::reserve_rehash
+#3  <HashMap<usize, u16> as FromIterator<(usize, u16)>>::from_iter
+#4  <ScryBackend as TargetIsa>::compile_function
+#5  cranelift_codegen::context::Context::compile_stencil
+#6  cranelift_codegen::context::Context::compile
+#7  cranelift_object::backend::ObjectModule::define_function_with_control_plane
+```
+
+i.e. a `HashMap<usize, u16>` is rebuilt from an iterator over and over
+inside a loop of the scheduling phase, whose cost grows super-linearly with
+the number of instructions and live values of the block (the 64-bit
+lowering produces many values with several uses each: carries, partial
+products and the spilled bits of shifts). This is what makes the test
+programs `int64.c` (`test`: 680 instructions) and `int64_ops.c` (`test`:
+1550 instructions) fail to compile end to end; every function in them of
+ordinary size compiles quickly, and both programs pass in the Cranelift
+interpreter.

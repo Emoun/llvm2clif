@@ -373,7 +373,7 @@ fn translate(
 ) -> anyhow::Result<Option<PathBuf>> {
     match cfg.mode {
         Mode::Clif => {
-            let text = translate_ll(cfg, ll)?.0;
+            let text = crate::emit::clif_text(&translate_ll(cfg, ll)?);
             let out = output_for(cfg, original, "clif");
             std::fs::write(&out, text).with_context(|| format!("writing {}", out.display()))?;
             Ok(None)
@@ -406,7 +406,8 @@ fn finish_single(cfg: &Config, produced: &Path, original: &Path, ext: &str) -> a
 
 /// Parses and translates an `.ll` file; returns the CLIF text and the
 /// object bytes.
-fn translate_ll(cfg: &Config, ll: &Path) -> anyhow::Result<(String, Vec<u8>)> {
+/// Parses and translates an `.ll` file.
+fn translate_ll(cfg: &Config, ll: &Path) -> anyhow::Result<crate::translate::ClifModule> {
     let src = std::fs::read_to_string(ll).with_context(|| format!("reading {}", ll.display()))?;
     let module = crate::llvm::parse_module(&src).map_err(|e| anyhow!("{}: {e}", ll.display()))?;
     let options = Options {
@@ -419,16 +420,15 @@ fn translate_ll(cfg: &Config, ll: &Path) -> anyhow::Result<(String, Vec<u8>)> {
     for (name, reason) in &translated.skipped {
         eprintln!("scry-cc: warning: skipped function @{name}: {reason}");
     }
-    let text = crate::emit::clif_text(&translated);
-    let bytes = crate::emit::object_file(&translated, &stem(ll))?;
-    Ok((text, bytes))
+    Ok(translated)
 }
 
 fn translate_to(cfg: &Config, ll: &Path, out: &Path) -> anyhow::Result<PathBuf> {
     if cfg.verbose {
         eprintln!("scry-cc: translating {} -> {}", ll.display(), out.display());
     }
-    let (_, bytes) = translate_ll(cfg, ll)?;
+    let translated = translate_ll(cfg, ll)?;
+    let bytes = crate::emit::object_file(&translated, &stem(ll))?;
     std::fs::write(out, bytes).with_context(|| format!("writing {}", out.display()))?;
     Ok(out.to_path_buf())
 }

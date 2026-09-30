@@ -1,13 +1,19 @@
 //! Mapping of LLVM types onto Cranelift types for the Scry target.
 //!
 //! Scry (as supported by the Cranelift backend) has 8-, 16- and 32-bit
-//! integers and 32-bit pointers. Every LLVM first-class value is represented
-//! as a flat list of Cranelift values, one per scalar leaf of the type:
+//! integers and 32-bit pointers; the backend has no 64-bit support yet. Every
+//! LLVM first-class value is represented as a flat list of Cranelift values:
 //!
-//! * `iN` with `N <= 64` maps to the smallest of `i8`/`i16`/`i32`/`i64` that
-//!   holds it. Widths other than 8, 16, 32 and 64 are kept *zero-extended*
-//!   inside the container ("canonical form"), so unsigned operations work
-//!   unchanged and signed operations sign-extend on demand.
+//! * `iN` with `N <= 32` maps to the smallest of `i8`/`i16`/`i32` that holds
+//!   it. Widths other than 8, 16 and 32 are kept *zero-extended* inside the
+//!   container ("canonical form"), so unsigned operations work unchanged and
+//!   signed operations sign-extend on demand.
+//! * `iN` with `32 < N <= 128` ("wide" integers) becomes `ceil(N / 32)`
+//!   values: 32-bit parts, least significant first, the last one holding the
+//!   remaining bits as a canonical value of its own container (so `i64` is
+//!   two `i32`s). Arithmetic on them is expanded into 32-bit operations by
+//!   the `wide` module. (`opt` produces `i65` for overflow-free loop trip
+//!   counts of 64-bit loops, so 64 bits alone would not be enough.)
 //! * `ptr` maps to `i32`.
 //! * Structs and arrays are flattened leaf by leaf (in memory order).
 //! * Integers wider than 64 bits, floating point and vector types are
@@ -17,10 +23,10 @@ use crate::llvm::{DataLayout, FuncType, Module, ParamAttrs, Type};
 use cranelift_codegen::ir::{types, AbiParam, ArgumentExtension, Signature};
 use cranelift_codegen::isa::CallConv;
 
-/// A scalar leaf type.
+/// A scalar (non-aggregate) LLVM type.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ScalarTy {
-    /// An integer of the given width in bits (1..=32).
+    /// An integer of the given width in bits (1..=128).
     Int(u32),
     /// A pointer (32 bits).
     Ptr,
@@ -34,7 +40,8 @@ impl ScalarTy {
         }
     }
 
-    /// The Cranelift type holding this scalar.
+    /// The Cranelift type holding this scalar (not for wide integers, which
+    /// have no single container).
     pub fn clif(self) -> types::Type {
         container(self.bits())
     }
@@ -44,27 +51,48 @@ impl ScalarTy {
         is_native(self.bits())
     }
 
+    /// Whether this is an integer wider than 32 bits, represented as
+    /// several 32-bit parts.
+    pub fn is_wide(self) -> bool {
+        self.bits() > 32
+    }
+
+    /// The number of 32-bit parts representing the scalar.
+    pub fn parts(self) -> usize {
+        self.bits().div_ceil(32) as usize
+    }
+
+    /// The scalar type of the most significant part of a wide integer (its
+    /// bits above the lower 32-bit parts).
+    pub fn top_part(self) -> ScalarTy {
+        debug_assert!(self.is_wide());
+        ScalarTy::Int(self.bits() - 32 * (self.parts() as u32 - 1))
+    }
+
     /// Number of bytes a load/store of this scalar accesses.
     pub fn store_bytes(self) -> u32 {
         self.bits().div_ceil(8)
     }
 }
 
-/// The Cranelift container type for an integer of `bits` bits.
+/// The Cranelift container type for an integer of `bits` bits (at most 32:
+/// wider integers are split into parts before they reach Cranelift).
 pub fn container(bits: u32) -> types::Type {
+    assert!(
+        bits <= 32,
+        "internal error: i{bits} has no Cranelift container (wide integers are split into 32-bit parts)"
+    );
     if bits <= 8 {
         types::I8
     } else if bits <= 16 {
         types::I16
-    } else if bits <= 32 {
-        types::I32
     } else {
-        types::I64
+        types::I32
     }
 }
 
 pub fn is_native(bits: u32) -> bool {
-    matches!(bits, 8 | 16 | 32 | 64)
+    matches!(bits, 8 | 16 | 32)
 }
 
 /// A scalar leaf of a flattened type together with its byte offset within
@@ -73,6 +101,8 @@ pub fn is_native(bits: u32) -> bool {
 pub struct Scalar {
     pub ty: ScalarTy,
     pub offset: u64,
+    /// Whether this leaf is one of the two parts of a wide integer.
+    pub part: bool,
 }
 
 /// Type layout and flattening service for one module.
@@ -133,8 +163,10 @@ impl<'m> Layout<'m> {
     pub fn scalar_of(&self, ty: &Type) -> Result<ScalarTy, String> {
         match self.resolve(ty)? {
             Type::Int(bits) => {
-                if *bits > 64 {
-                    Err(format!("i{bits} is not supported by the Scry backend (integers must be at most 64 bits wide)"))
+                if *bits > 128 {
+                    Err(format!(
+                        "i{bits} is not supported (integers must be at most 128 bits wide)"
+                    ))
                 } else {
                     Ok(ScalarTy::Int(*bits))
                 }
@@ -179,10 +211,28 @@ impl<'m> Layout<'m> {
             }
             other => {
                 let s = self.scalar_of(other)?;
-                out.push(Scalar {
-                    ty: s,
-                    offset: base,
-                });
+                if s.is_wide() {
+                    // 32-bit parts, least significant first (little-endian),
+                    // the last one holding whatever bits remain.
+                    let k = s.parts();
+                    for i in 0..k {
+                        out.push(Scalar {
+                            ty: if i + 1 == k {
+                                s.top_part()
+                            } else {
+                                ScalarTy::Int(32)
+                            },
+                            offset: base + 4 * i as u64,
+                            part: true,
+                        });
+                    }
+                } else {
+                    out.push(Scalar {
+                        ty: s,
+                        offset: base,
+                        part: false,
+                    });
+                }
                 Ok(())
             }
         }
@@ -240,9 +290,10 @@ impl<'m> Layout<'m> {
         // both sides of a call. Everything is passed with an unsigned tag so
         // that callers and callees always agree; `signext` (which clang puts
         // on sub-word signed integers) is only honored when signed
-        // operations are emitted natively.
-        let ext = |a: Option<&ParamAttrs>| {
-            if honor_signext && a.is_some_and(|a| a.signext) {
+        // operations are emitted natively. The parts of a wide integer are
+        // always unsigned (their canonical form is zero-extended).
+        let ext = |a: Option<&ParamAttrs>, leaf: &Scalar| {
+            if !leaf.part && honor_signext && a.is_some_and(|a| a.signext) {
                 ArgumentExtension::Sext
             } else {
                 ArgumentExtension::Uext
@@ -254,7 +305,7 @@ impl<'m> Layout<'m> {
             let attrs = param_attrs.get(i);
             for leaf in leaves {
                 let mut ap = AbiParam::new(leaf.ty.clif());
-                ap.extension = ext(attrs);
+                ap.extension = ext(attrs, &leaf);
                 sig.params.push(ap);
             }
         }
@@ -263,7 +314,7 @@ impl<'m> Layout<'m> {
             .map_err(|e| format!("return type: {e}"))?
         {
             let mut ap = AbiParam::new(leaf.ty.clif());
-            ap.extension = ext(Some(ret_attrs));
+            ap.extension = ext(Some(ret_attrs), &leaf);
             sig.returns.push(ap);
         }
         Ok(sig)
@@ -283,6 +334,16 @@ pub fn mask(bits: u32) -> u64 {
 /// extended) value.
 pub fn truncate_const(v: i128, bits: u32) -> u64 {
     (v as u64) & mask(bits)
+}
+
+/// Truncates an integer constant to `bits` (at most 128) bits, as an
+/// unsigned value.
+pub fn truncate_const128(v: i128, bits: u32) -> u128 {
+    if bits >= 128 {
+        v as u128
+    } else {
+        (v as u128) & ((1u128 << bits) - 1)
+    }
 }
 
 /// Sign extends the low `bits` bits of `v`.
@@ -313,15 +374,18 @@ mod tests {
             vec![
                 Scalar {
                     ty: ScalarTy::Int(8),
-                    offset: 0
+                    offset: 0,
+                    part: false
                 },
                 Scalar {
                     ty: ScalarTy::Int(16),
-                    offset: 2
+                    offset: 2,
+                    part: false
                 },
                 Scalar {
                     ty: ScalarTy::Int(32),
-                    offset: 4
+                    offset: 4,
+                    part: false
                 }
             ]
         );
@@ -332,27 +396,64 @@ mod tests {
             f[3],
             Scalar {
                 ty: ScalarTy::Ptr,
-                offset: 8
+                offset: 8,
+                part: false
             }
         );
         assert_eq!(
             f[4],
             Scalar {
                 ty: ScalarTy::Ptr,
-                offset: 12
+                offset: 12,
+                part: false
             }
         );
         assert_eq!(l.flat_range(&n, &[1, 1]).unwrap(), (4, 1, Type::Ptr(0)));
         assert_eq!(l.flat_range(&n, &[0]).unwrap().0, 0);
         assert_eq!(l.flat_range(&n, &[0]).unwrap().1, 3);
+        // Wide integers are split into a 32-bit low part and the rest.
         assert_eq!(
             l.flatten(&Type::Int(64)).unwrap(),
-            vec![Scalar {
-                ty: ScalarTy::Int(64),
-                offset: 0
-            }]
+            vec![
+                Scalar {
+                    ty: ScalarTy::Int(32),
+                    offset: 0,
+                    part: true
+                },
+                Scalar {
+                    ty: ScalarTy::Int(32),
+                    offset: 4,
+                    part: true
+                }
+            ]
         );
-        assert!(l.flatten(&Type::Int(128)).is_err());
+        assert_eq!(
+            l.flatten(&Type::Int(40)).unwrap(),
+            vec![
+                Scalar {
+                    ty: ScalarTy::Int(32),
+                    offset: 0,
+                    part: true
+                },
+                Scalar {
+                    ty: ScalarTy::Int(8),
+                    offset: 4,
+                    part: true
+                }
+            ]
+        );
+        let w = Type::Struct {
+            fields: vec![Type::Int(32), Type::Int(64)],
+            packed: false,
+        };
+        assert_eq!(l.flat_range(&w, &[1]).unwrap().0, 1);
+        assert_eq!(l.flat_range(&w, &[1]).unwrap().1, 2);
+        let f = l.flatten(&Type::Int(65)).unwrap();
+        assert_eq!(f.len(), 3);
+        assert_eq!(f[2].ty, ScalarTy::Int(1));
+        assert_eq!(f[2].offset, 8);
+        assert_eq!(l.flatten(&Type::Int(128)).unwrap().len(), 4);
+        assert!(l.flatten(&Type::Int(129)).is_err());
         assert!(l
             .flatten(&Type::Float(crate::llvm::FloatKind::Float))
             .is_err());
@@ -369,7 +470,13 @@ mod tests {
         assert_eq!(container(1), types::I8);
         assert_eq!(container(9), types::I16);
         assert_eq!(container(24), types::I32);
-        assert_eq!(container(64), types::I64);
-        assert_eq!(container(40), types::I64);
+        assert!(!ScalarTy::Int(32).is_wide());
+        assert!(ScalarTy::Int(33).is_wide());
+        assert_eq!(ScalarTy::Int(48).top_part(), ScalarTy::Int(16));
+        assert_eq!(ScalarTy::Int(64).parts(), 2);
+        assert_eq!(ScalarTy::Int(65).parts(), 3);
+        assert_eq!(ScalarTy::Int(65).top_part(), ScalarTy::Int(1));
+        assert_eq!(truncate_const128(-1, 65), (1u128 << 65) - 1);
+        assert_eq!(truncate_const128(-1, 128), u128::MAX);
     }
 }

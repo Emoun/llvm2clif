@@ -2,7 +2,8 @@
 
 use super::data::{alias_target, gep_const_offset};
 use super::types::{
-    container, is_native, mask, sign_extend_const, truncate_const, Layout, ScalarTy,
+    container, is_native, mask, sign_extend_const, truncate_const, truncate_const128, Layout,
+    ScalarTy,
 };
 use super::{ModuleCtx, TResult, TransError};
 use crate::llvm::*;
@@ -14,7 +15,7 @@ use cranelift_codegen::ir::{
     StackSlotKind, TrapCode, UserFuncName, Value,
 };
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 /// Constant-size memory operations up to this many bytes are expanded
 /// inline; larger ones call the runtime library.
@@ -25,6 +26,7 @@ pub(super) fn translate_function(
     ctx: &ModuleCtx,
     f: &Function,
     runtime_imports: &mut BTreeMap<String, Signature>,
+    helpers: &mut BTreeSet<&'static str>,
 ) -> Result<ir::Function, (u32, TransError)> {
     let sig = ctx
         .declared_signature(f)
@@ -47,6 +49,7 @@ pub(super) fn translate_function(
             gvs: HashMap::new(),
             const_vals: HashMap::new(),
             runtime_imports,
+            helpers,
             cur_block: BlockId(0),
             cur_line: f.line,
         };
@@ -101,7 +104,7 @@ pub(super) fn translate_alias(
     Ok(func)
 }
 
-fn verify(ctx: &ModuleCtx, func: &ir::Function) -> TResult<()> {
+pub(super) fn verify(ctx: &ModuleCtx, func: &ir::Function) -> TResult<()> {
     cranelift_codegen::verify_function(func, &*ctx.isa).map_err(|errs| {
         TransError::invalid(format!(
             "internal error: the generated Cranelift IR failed verification:\n{errs}\n{}",
@@ -143,6 +146,8 @@ pub(super) struct FuncTranslator<'a, 'm> {
     const_vals: HashMap<Value, u64>,
     /// Runtime helper functions referenced by the translation.
     runtime_imports: &'a mut BTreeMap<String, Signature>,
+    /// Helper functions generated into the module (see `wide`).
+    pub(super) helpers: &'a mut BTreeSet<&'static str>,
     cur_block: BlockId,
     pub(super) cur_line: u32,
 }
@@ -243,10 +248,15 @@ impl<'a, 'm> FuncTranslator<'a, 'm> {
         val
     }
 
+    /// The value of `v` if it is a known constant.
+    pub(super) fn known_const(&self, v: Value) -> Option<u64> {
+        self.const_vals.get(&v).copied()
+    }
+
     /// Flips the sign bit of a container value of `bits` bits, so that
     /// unsigned comparisons of the results order like signed comparisons of
     /// the inputs.
-    fn flip_sign(&mut self, v: Value, bits: u32) -> Value {
+    pub(super) fn flip_sign(&mut self, v: Value, bits: u32) -> Value {
         let c = container(bits);
         let s = 1u64 << (c.bits() - 1);
         if let Some(k) = self.const_vals.get(&v) {
@@ -461,7 +471,7 @@ impl<'a, 'm> FuncTranslator<'a, 'm> {
         let v = self.use_op(op)?;
         if v.len() != 1 {
             return Err(TransError::invalid(format!(
-                "expected a scalar value, found an aggregate of {} scalars",
+                "expected a scalar value of at most 32 bits, found one of {} parts",
                 v.len()
             )));
         }
@@ -479,6 +489,10 @@ impl<'a, 'm> FuncTranslator<'a, 'm> {
         match &c.kind {
             ConstKind::Int(v) => {
                 let s = self.scalar_of(&c.ty)?;
+                if s.is_wide() {
+                    let p = self.wide_const(truncate_const128(*v, s.bits()), s.parts());
+                    return Ok(self.wide_out(&p, s.bits()));
+                }
                 Ok(vec![self.iconst(s.clif(), truncate_const(*v, s.bits()))])
             }
             ConstKind::Null => Ok(vec![self.iconst(types::I32, 0)]),
@@ -531,6 +545,12 @@ impl<'a, 'm> FuncTranslator<'a, 'm> {
                 let s = self.scalar_of(&c.ty)?;
                 let l = self.emit_constant(a)?;
                 let r = self.emit_constant(b)?;
+                if s.is_wide() {
+                    let lp = self.wide_in(&l, s.bits())?;
+                    let rp = self.wide_in(&r, s.bits())?;
+                    let p = self.emit_binop_wide(*op, s.bits(), &lp, &rp)?;
+                    return Ok(self.wide_out(&p, s.bits()));
+                }
                 if l.len() != 1 || r.len() != 1 {
                     return Err(TransError::unsupported(
                         "vector constant expressions are not supported",
@@ -542,6 +562,16 @@ impl<'a, 'm> FuncTranslator<'a, 'm> {
                 let s = self.scalar_of(&a.ty)?;
                 let l = self.emit_constant(a)?;
                 let r = self.emit_constant(b)?;
+                if s.is_wide() {
+                    let lp = self.wide_in(&l, s.bits())?;
+                    let rp = self.wide_in(&r, s.bits())?;
+                    return Ok(vec![self.wide_icmp(*pred, s.bits(), &lp, &rp)]);
+                }
+                if l.len() != 1 || r.len() != 1 {
+                    return Err(TransError::unsupported(
+                        "vector constant expressions are not supported",
+                    ));
+                }
                 Ok(vec![self.emit_icmp(*pred, s.bits(), l[0], r[0])])
             }
             ConstKind::Select(cond, a, b) => {
@@ -693,11 +723,36 @@ impl<'a, 'm> FuncTranslator<'a, 'm> {
     ) -> TResult<Vec<Value>> {
         let fs = self.scalar_of(from)?;
         let ts = self.scalar_of(to)?;
+        let (fb, tb) = (fs.bits(), ts.bits());
+        match op {
+            CastOp::FPTrunc
+            | CastOp::FPExt
+            | CastOp::FPToUI
+            | CastOp::FPToSI
+            | CastOp::UIToFP
+            | CastOp::SIToFP => {
+                return Err(TransError::unsupported(format!(
+                    "floating point conversion `{}` is not supported",
+                    op.name()
+                )))
+            }
+            CastOp::BitCast | CastOp::AddrSpaceCast => {
+                if fb != tb {
+                    return Err(TransError::invalid(format!(
+                        "bitcast between types of different sizes ({from} to {to})"
+                    )));
+                }
+                return Ok(vals);
+            }
+            _ => {}
+        }
+        if fs.is_wide() || ts.is_wide() {
+            return self.emit_cast_wide(op, fs, ts, vals);
+        }
         if vals.len() != 1 {
             return Err(TransError::invalid("cast of a non-scalar value"));
         }
         let v = vals[0];
-        let (fb, tb) = (fs.bits(), ts.bits());
         let (fc, tc) = (container(fb), container(tb));
         let out = match op {
             CastOp::Trunc | CastOp::PtrToInt if tb < fb => {
@@ -729,28 +784,60 @@ impl<'a, 'm> FuncTranslator<'a, 'm> {
                 let r = self.emit_sextend(v, fb, tc);
                 self.canon(r, tb)
             }
-            CastOp::BitCast | CastOp::AddrSpaceCast => {
-                if fb != tb {
-                    return Err(TransError::invalid(format!(
-                        "bitcast between types of different sizes ({from} to {to})"
-                    )));
-                }
-                v
-            }
-            CastOp::FPTrunc
-            | CastOp::FPExt
-            | CastOp::FPToUI
-            | CastOp::FPToSI
-            | CastOp::UIToFP
-            | CastOp::SIToFP => {
-                return Err(TransError::unsupported(format!(
-                    "floating point conversion `{}` is not supported",
-                    op.name()
-                )))
-            }
             _ => unreachable!(),
         };
         Ok(vec![out])
+    }
+
+    /// A cast with a wide integer on at least one side.
+    fn emit_cast_wide(
+        &mut self,
+        op: CastOp,
+        fs: ScalarTy,
+        ts: ScalarTy,
+        vals: Vec<Value>,
+    ) -> TResult<Vec<Value>> {
+        let (fb, tb) = (fs.bits(), ts.bits());
+        let sext = matches!(op, CastOp::SExt);
+        if fs.is_wide() && ts.is_wide() {
+            // Keep the low parts (`wide_out` re-masks the new top part) and
+            // extend with zeros or the sign.
+            let w = self.wide_in(&vals, fb)?;
+            let w = if sext { self.wide_sext_in(&w, fb) } else { w };
+            let kt = ts.parts();
+            let mut out: Vec<Value> = w.iter().copied().take(kt).collect();
+            if kt > w.len() {
+                let fill = if sext {
+                    let c31 = self.iconst(types::I32, 31);
+                    self.emit_sshr(w[w.len() - 1], c31, 32)
+                } else {
+                    self.iconst(types::I32, 0)
+                };
+                out.resize(kt, fill);
+            }
+            return Ok(self.wide_out(&out, tb));
+        }
+        if fs.is_wide() {
+            // Wide to narrow (`trunc`, `inttoptr`): the lowest part.
+            let w = self.wide_in(&vals, fb)?;
+            let r = self.resize_unsigned(w[0], types::I32, container(tb));
+            return Ok(vec![self.canon(r, tb)]);
+        }
+        // Narrow to wide (`zext`, `sext`, `ptrtoint`).
+        if vals.len() != 1 {
+            return Err(TransError::invalid("cast of a non-scalar value"));
+        }
+        let v = vals[0];
+        let (lo, fill) = if sext {
+            let lo = self.sext_to_i32(v, fb);
+            let c31 = self.iconst(types::I32, 31);
+            (lo, self.emit_sshr(lo, c31, 32))
+        } else {
+            (self.zext_to_i32(v, fb), self.iconst(types::I32, 0))
+        };
+        let mut out = vec![lo];
+        out.resize(ts.parts(), fill);
+        Ok(self.wide_out(&out, tb))
     }
 
     // -- memory ---------------------------------------------------------
@@ -766,7 +853,6 @@ impl<'a, 'm> FuncTranslator<'a, 'm> {
             1 => self.b.ins().load(types::I8, flags, ptr, off),
             2 => self.b.ins().load(types::I16, flags, ptr, off),
             4 => self.b.ins().load(types::I32, flags, ptr, off),
-            8 => self.b.ins().load(types::I64, flags, ptr, off),
             _ => {
                 // Odd sizes (3, 5, 6, 7 bytes): assemble from power-of-two
                 // sized loads, least significant part first.
@@ -805,7 +891,7 @@ impl<'a, 'm> FuncTranslator<'a, 'm> {
         let off = mem_offset(offset)?;
         let bytes = sty.store_bytes();
         match bytes {
-            1 | 2 | 4 | 8 => {
+            1 | 2 | 4 => {
                 self.b.ins().store(flags, val, ptr, off);
             }
             _ => {
@@ -950,6 +1036,9 @@ impl<'a, 'm> FuncTranslator<'a, 'm> {
     ) -> TResult<()> {
         let sty = self.scalar_of(&val.ty)?;
         let bits = sty.bits();
+        if sty.is_wide() {
+            return self.translate_switch_wide(val, default, cases);
+        }
         let v = self.use_scalar(&val.op)?;
         let default_args = self.edge_args(default)?;
         if cases.is_empty() {
@@ -1043,22 +1132,82 @@ impl<'a, 'm> FuncTranslator<'a, 'm> {
         Ok(())
     }
 
+    /// A `switch` on a wide integer: a chain of equality tests on the parts.
+    fn translate_switch_wide(
+        &mut self,
+        val: &TypedOperand,
+        default: BlockId,
+        cases: &[SwitchCase],
+    ) -> TResult<()> {
+        let sty = self.scalar_of(&val.ty)?;
+        let bits = sty.bits();
+        let v = self.use_wide(&val.op, bits)?;
+        let default_args = self.edge_args(default)?;
+        // All the comparisons are made in the current block; the chain of
+        // branches below only consumes them.
+        let mut conds = Vec::with_capacity(cases.len());
+        for c in cases {
+            let k = self.wide_const(truncate_const128(c.value, bits), sty.parts());
+            let cond = self.wide_icmp(IPred::Eq, bits, &v, &k);
+            conds.push((cond, c.target));
+        }
+        if conds.is_empty() {
+            self.b
+                .ins()
+                .jump(self.blocks[default.0 as usize], &default_args);
+            return Ok(());
+        }
+        for (i, (cond, target)) in conds.iter().enumerate() {
+            let targs = self.edge_args(*target)?;
+            if i + 1 == conds.len() {
+                self.b.ins().brif(
+                    *cond,
+                    self.blocks[target.0 as usize],
+                    &targs,
+                    self.blocks[default.0 as usize],
+                    &default_args,
+                );
+            } else {
+                let next = self.b.create_block();
+                self.b
+                    .ins()
+                    .brif(*cond, self.blocks[target.0 as usize], &targs, next, &[]);
+                self.b.switch_to_block(next);
+            }
+        }
+        Ok(())
+    }
+
     // -- instructions ---------------------------------------------------
 
     fn translate_inst(&mut self, inst: &Instruction) -> TResult<()> {
         match &inst.kind {
             InstKind::Binary { op, lhs, rhs, .. } => {
                 let sty = self.scalar_of(&inst.ty)?;
-                let l = self.use_scalar(lhs)?;
-                let r = self.use_scalar(rhs)?;
-                let v = self.emit_binop(*op, sty.bits(), l, r)?;
-                self.define(inst, vec![v]);
+                if sty.is_wide() {
+                    let l = self.use_wide(lhs, sty.bits())?;
+                    let r = self.use_wide(rhs, sty.bits())?;
+                    let p = self.emit_binop_wide(*op, sty.bits(), &l, &r)?;
+                    let vals = self.wide_out(&p, sty.bits());
+                    self.define(inst, vals);
+                } else {
+                    let l = self.use_scalar(lhs)?;
+                    let r = self.use_scalar(rhs)?;
+                    let v = self.emit_binop(*op, sty.bits(), l, r)?;
+                    self.define(inst, vec![v]);
+                }
             }
             InstKind::ICmp { pred, ty, lhs, rhs } => {
                 let sty = self.scalar_of(ty)?;
-                let l = self.use_scalar(lhs)?;
-                let r = self.use_scalar(rhs)?;
-                let v = self.emit_icmp(*pred, sty.bits(), l, r);
+                let v = if sty.is_wide() {
+                    let l = self.use_wide(lhs, sty.bits())?;
+                    let r = self.use_wide(rhs, sty.bits())?;
+                    self.wide_icmp(*pred, sty.bits(), &l, &r)
+                } else {
+                    let l = self.use_scalar(lhs)?;
+                    let r = self.use_scalar(rhs)?;
+                    self.emit_icmp(*pred, sty.bits(), l, r)
+                };
                 self.define(inst, vec![v]);
             }
             InstKind::FCmp => {
@@ -1288,9 +1437,15 @@ impl<'a, 'm> FuncTranslator<'a, 'm> {
                     const_off = const_off.wrapping_add(v.wrapping_mul(stride as i64));
                 }
                 op => {
-                    let ibits = self.scalar_of(&idx.ty)?.bits();
-                    let iv = self.use_scalar(op)?;
-                    let iv = self.sext_to_i32(iv, ibits);
+                    let ity = self.scalar_of(&idx.ty)?;
+                    let iv = if ity.is_wide() {
+                        // Addresses are 32 bits wide: only the lowest part
+                        // of a wide index matters.
+                        self.use_wide(op, ity.bits())?[0]
+                    } else {
+                        let iv = self.use_scalar(op)?;
+                        self.sext_to_i32(iv, ity.bits())
+                    };
                     let term = if stride == 1 {
                         iv
                     } else if stride.is_power_of_two() {

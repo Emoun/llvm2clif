@@ -10,12 +10,13 @@ mod data;
 mod func;
 mod intrinsics;
 pub mod types;
+mod wide;
 
 use crate::llvm::{Linkage, Module, ParamAttrs};
 use cranelift_codegen::ir::{self, Signature};
 use cranelift_codegen::isa::OwnedTargetIsa;
 use cranelift_codegen::settings::{self, Configurable};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use types::Layout;
 
@@ -281,12 +282,13 @@ pub fn translate_module(module: &Module, options: &Options) -> Result<ClifModule
         function_names: Vec::new(),
     };
     let mut runtime_imports: BTreeMap<String, Signature> = BTreeMap::new();
+    let mut helpers: BTreeSet<&'static str> = BTreeSet::new();
 
     for f in &module.functions {
         if f.is_declaration {
             continue;
         }
-        match func::translate_function(&ctx, f, &mut runtime_imports) {
+        match func::translate_function(&ctx, f, &mut runtime_imports, &mut helpers) {
             Ok(func) => out.functions.push(ClifFunction {
                 name: f.name.clone(),
                 linkage: f.linkage,
@@ -344,6 +346,26 @@ pub fn translate_module(module: &Module, options: &Options) -> Result<ClifModule
                 })
             }
         }
+    }
+
+    // Helper functions the translation relies on, generated into the module
+    // (local symbols, so that every object file can carry its own copy).
+    for name in &helpers {
+        let func = match *name {
+            wide::UDIVMOD64 => wide::build_udivmod64(&ctx),
+            other => Err(TransError::invalid(format!("unknown helper `{other}`"))),
+        }
+        .map_err(|e| Diagnostic {
+            function: Some(name.to_string()),
+            line: 0,
+            message: e.message,
+            unsupported: e.unsupported,
+        })?;
+        out.functions.push(ClifFunction {
+            name: name.to_string(),
+            linkage: Linkage::Internal,
+            func,
+        });
     }
 
     for g in &module.globals {

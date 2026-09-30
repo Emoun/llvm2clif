@@ -2,11 +2,12 @@
 //!
 //! Intrinsics the Scry backend cannot express directly (population count,
 //! leading/trailing zero counts, funnel shifts, multiplication overflow,
-//! saturating arithmetic, ...) are expanded into sequences of supported
-//! Cranelift instructions.
+//! saturating arithmetic, anything on integers wider than 32 bits, ...) are
+//! expanded into sequences of supported Cranelift instructions.
 
 use super::func::FuncTranslator;
 use super::types::{container, is_native, mask, ScalarTy};
+use super::wide::Wide;
 use super::{TResult, TransError};
 use crate::llvm::*;
 use cranelift_codegen::ir::condcodes::IntCC;
@@ -56,6 +57,10 @@ impl FuncTranslator<'_, '_> {
                 let s = self.ret_scalar(ret_ty)?;
                 let min = args.get(1).and_then(|a| const_int(&a.op)).unwrap_or(0) != 0;
                 let v = if min { 0 } else { mask(s.bits()) };
+                if s.is_wide() {
+                    let p = self.wide_const(v as u128, s.parts());
+                    return Ok(self.wide_out(&p, s.bits()));
+                }
                 Ok(vec![self.iconst(s.clif(), v)])
             }
             "trap" | "debugtrap" | "ubsantrap" => {
@@ -67,6 +72,13 @@ impl FuncTranslator<'_, '_> {
             }
             "abs" => {
                 let s = self.arg_scalar_ty(args, 0)?;
+                if s.is_wide() {
+                    let x = self.use_wide(&args[0].op, s.bits())?;
+                    let x = self.wide_sext_in(&x, s.bits());
+                    let neg = self.wide_sign(&x);
+                    let r = self.wide_negate_if(&x, neg);
+                    return Ok(self.wide_out(&r, s.bits()));
+                }
                 let x = self.use_scalar(&args[0].op)?;
                 let xs = self.sext_in(x, s.bits());
                 let r = self.emit_iabs(xs, s.bits());
@@ -74,6 +86,19 @@ impl FuncTranslator<'_, '_> {
             }
             "smax" | "smin" | "umax" | "umin" => {
                 let s = self.arg_scalar_ty(args, 0)?;
+                if s.is_wide() {
+                    let a = self.use_wide(&args[0].op, s.bits())?;
+                    let b = self.use_wide(&args[1].op, s.bits())?;
+                    let pred = match base {
+                        "smax" => IPred::Sgt,
+                        "smin" => IPred::Slt,
+                        "umax" => IPred::Ugt,
+                        _ => IPred::Ult,
+                    };
+                    let c = self.wide_icmp(pred, s.bits(), &a, &b);
+                    let r = self.wide_select(c, &a, &b);
+                    return Ok(self.wide_out(&r, s.bits()));
+                }
                 let a = self.use_scalar(&args[0].op)?;
                 let b = self.use_scalar(&args[1].op)?;
                 let signed = base.starts_with('s');
@@ -92,17 +117,23 @@ impl FuncTranslator<'_, '_> {
             }
             "bswap" => {
                 let s = self.arg_scalar_ty(args, 0)?;
+                if s.is_wide() {
+                    if s.bits() != 64 {
+                        return Err(TransError::unsupported(format!(
+                            "llvm.bswap on i{} is not supported",
+                            s.bits()
+                        )));
+                    }
+                    // Swap the halves and byte-swap each.
+                    let w = self.use_wide(&args[0].op, 64)?;
+                    let nlo = self.b.ins().bswap(w[1]);
+                    let nhi = self.b.ins().bswap(w[0]);
+                    return Ok(self.wide_out(&[nlo, nhi], 64));
+                }
                 let x = self.use_scalar(&args[0].op)?;
                 match s.bits() {
                     8 => Ok(vec![x]),
                     16 | 32 => Ok(vec![self.b.ins().bswap(x)]),
-                    64 => {
-                        // Swap the halves and byte-swap each with 32-bit ops.
-                        let (lo, hi) = self.split64(x);
-                        let lo = self.b.ins().bswap(lo);
-                        let hi = self.b.ins().bswap(hi);
-                        Ok(vec![self.join64(hi, lo)])
-                    }
                     b => Err(TransError::unsupported(format!(
                         "llvm.bswap on i{b} is not supported"
                     ))),
@@ -110,25 +141,29 @@ impl FuncTranslator<'_, '_> {
             }
             "ctpop" => {
                 let s = self.arg_scalar_ty(args, 0)?;
+                if s.is_wide() {
+                    let w = self.use_wide(&args[0].op, s.bits())?;
+                    let mut r = self.popcount32(w[0]);
+                    for p in &w[1..] {
+                        let c = self.popcount32(*p);
+                        r = self.b.ins().iadd(r, c);
+                    }
+                    let zero = self.iconst(types::I32, 0);
+                    let mut out = vec![r];
+                    out.resize(s.parts(), zero);
+                    return Ok(self.wide_out(&out, s.bits()));
+                }
                 let x = self.use_scalar(&args[0].op)?;
-                let r = if s.bits() > 32 {
-                    let (lo, hi) = self.split64(x);
-                    let a = self.popcount32(lo);
-                    let b = self.popcount32(hi);
-                    self.b.ins().iadd(a, b)
-                } else {
-                    let x32 = self.zext_to_i32(x, s.bits());
-                    self.popcount32(x32)
-                };
+                let x32 = self.zext_to_i32(x, s.bits());
+                let r = self.popcount32(x32);
                 Ok(vec![self.resize_unsigned(r, types::I32, s.clif())])
             }
             "ctlz" => {
                 let s = self.arg_scalar_ty(args, 0)?;
-                let x = self.use_scalar(&args[0].op)?;
-                let r = if s.bits() > 32 {
+                if s.is_wide() {
                     // ctlz64 = hi == 0 ? 32 + ctlz(lo) : ctlz(hi); the width
                     // adjustment below handles i33..i63.
-                    let (lo, hi) = self.split64(x);
+                    let (lo, hi) = self.wide_halves(base, args)?;
                     let clo = self.ctlz32(lo);
                     let chi = self.ctlz32(hi);
                     let zero = self.iconst(types::I32, 0);
@@ -137,21 +172,21 @@ impl FuncTranslator<'_, '_> {
                     let lo_path = self.b.ins().iadd(clo, c32);
                     let r = self.b.ins().select(hi_zero, lo_path, chi);
                     let adj = self.iconst(types::I32, (64 - s.bits()) as u64);
-                    self.b.ins().isub(r, adj)
-                } else {
-                    let x32 = self.zext_to_i32(x, s.bits());
-                    let r = self.ctlz32(x32);
-                    // ctlz of the narrow value = ctlz32 - (32 - width)
-                    let adj = self.iconst(types::I32, (32 - s.bits()) as u64);
-                    self.b.ins().isub(r, adj)
-                };
+                    let r = self.b.ins().isub(r, adj);
+                    return Ok(self.wide_out(&[r, zero], s.bits()));
+                }
+                let x = self.use_scalar(&args[0].op)?;
+                let x32 = self.zext_to_i32(x, s.bits());
+                let r = self.ctlz32(x32);
+                // ctlz of the narrow value = ctlz32 - (32 - width)
+                let adj = self.iconst(types::I32, (32 - s.bits()) as u64);
+                let r = self.b.ins().isub(r, adj);
                 Ok(vec![self.resize_unsigned(r, types::I32, s.clif())])
             }
             "cttz" => {
                 let s = self.arg_scalar_ty(args, 0)?;
-                let x = self.use_scalar(&args[0].op)?;
-                let r = if s.bits() > 32 {
-                    let (lo, hi) = self.split64(x);
+                if s.is_wide() {
+                    let (lo, hi) = self.wide_halves(base, args)?;
                     let tlo = self.cttz32(lo);
                     let thi = self.cttz32(hi);
                     let zero = self.iconst(types::I32, 0);
@@ -160,26 +195,30 @@ impl FuncTranslator<'_, '_> {
                     let hi_path = self.b.ins().iadd(thi, c32);
                     let r = self.b.ins().select(lo_zero, hi_path, tlo);
                     let w = self.iconst(types::I32, s.bits() as u64);
-                    self.b.ins().umin(r, w)
-                } else {
-                    let x32 = self.zext_to_i32(x, s.bits());
-                    let r = self.cttz32(x32);
-                    let w = self.iconst(types::I32, s.bits() as u64);
-                    self.b.ins().umin(r, w)
-                };
+                    let r = self.b.ins().umin(r, w);
+                    return Ok(self.wide_out(&[r, zero], s.bits()));
+                }
+                let x = self.use_scalar(&args[0].op)?;
+                let x32 = self.zext_to_i32(x, s.bits());
+                let r = self.cttz32(x32);
+                let w = self.iconst(types::I32, s.bits() as u64);
+                let r = self.b.ins().umin(r, w);
                 Ok(vec![self.resize_unsigned(r, types::I32, s.clif())])
             }
             "bitreverse" => {
                 let s = self.arg_scalar_ty(args, 0)?;
-                let x = self.use_scalar(&args[0].op)?;
-                if s.bits() > 32 {
-                    let (lo, hi) = self.split64(x);
-                    let rlo = self.bitreverse32(lo);
-                    let rhi = self.bitreverse32(hi);
-                    let r = self.join64(rlo, rhi);
-                    let sh = self.iconst(types::I64, (64 - s.bits()) as u64);
-                    return Ok(vec![self.b.ins().ushr(r, sh)]);
+                if s.is_wide() {
+                    let (lo, hi) = self.wide_halves(base, args)?;
+                    let rlo = self.bitreverse32(hi);
+                    let rhi = self.bitreverse32(lo);
+                    let mut r = vec![rlo, rhi];
+                    if s.bits() < 64 {
+                        let sh = self.iconst(types::I32, (64 - s.bits()) as u64);
+                        r = self.wide_lshr(&r, sh);
+                    }
+                    return Ok(self.wide_out(&r, s.bits()));
                 }
+                let x = self.use_scalar(&args[0].op)?;
                 let x32 = self.zext_to_i32(x, s.bits());
                 let r = self.bitreverse32(x32);
                 let r = if s.bits() < 32 {
@@ -192,6 +231,36 @@ impl FuncTranslator<'_, '_> {
             }
             "fshl" | "fshr" => {
                 let s = self.arg_scalar_ty(args, 0)?;
+                let left = base == "fshl";
+                if s.is_wide() {
+                    if s.bits() != 64 {
+                        return Err(TransError::unsupported(format!(
+                            "funnel shift on i{} is not supported",
+                            s.bits()
+                        )));
+                    }
+                    let a = self.use_wide(&args[0].op, 64)?;
+                    let b = self.use_wide(&args[1].op, 64)?;
+                    let c = self.use_wide(&args[2].op, 64)?;
+                    let c63 = self.iconst(types::I32, 63);
+                    let sh = self.b.ins().band(c[0], c63);
+                    let c64 = self.iconst(types::I32, 64);
+                    let inv = self.b.ins().isub(c64, sh);
+                    let zero = self.iconst(types::I32, 0);
+                    let is_zero = self.b.ins().icmp(IntCC::Equal, sh, zero);
+                    let r = if left {
+                        let hi = self.wide_shl(&a, sh);
+                        let lo = self.wide_lshr(&b, inv);
+                        let combined = self.wide_or(&hi, &lo);
+                        self.wide_select(is_zero, &a, &combined)
+                    } else {
+                        let lo = self.wide_lshr(&b, sh);
+                        let hi = self.wide_shl(&a, inv);
+                        let combined = self.wide_or(&hi, &lo);
+                        self.wide_select(is_zero, &b, &combined)
+                    };
+                    return Ok(self.wide_out(&r, 64));
+                }
                 if !is_native(s.bits()) {
                     return Err(TransError::unsupported(format!(
                         "funnel shift on i{} is not supported",
@@ -201,7 +270,6 @@ impl FuncTranslator<'_, '_> {
                 let a = self.use_scalar(&args[0].op)?;
                 let b = self.use_scalar(&args[1].op)?;
                 let c = self.use_scalar(&args[2].op)?;
-                let left = base == "fshl";
                 if same_operand(&args[0].op, &args[1].op) && s.bits() <= 32 {
                     let r = if left {
                         self.b.ins().rotl(a, c)
@@ -233,6 +301,29 @@ impl FuncTranslator<'_, '_> {
             "sadd.with.overflow" | "uadd.with.overflow" | "ssub.with.overflow"
             | "usub.with.overflow" => {
                 let s = self.arg_scalar_ty(args, 0)?;
+                if s.is_wide() {
+                    let (a, b) = self.wide_args64(base, args)?;
+                    let (r, o) = match base {
+                        "uadd.with.overflow" => self.wide_add_carry(&a, &b),
+                        "usub.with.overflow" => {
+                            let r = self.wide_sub(&a, &b);
+                            (r, self.wide_icmp(IPred::Ult, 64, &a, &b))
+                        }
+                        "sadd.with.overflow" => {
+                            let r = self.wide_add(&a, &b);
+                            let o = self.wide_sadd_overflow(&a, &b, &r);
+                            (r, o)
+                        }
+                        _ => {
+                            let r = self.wide_sub(&a, &b);
+                            let o = self.wide_ssub_overflow(&a, &b, &r);
+                            (r, o)
+                        }
+                    };
+                    let mut out = self.wide_out(&r, 64);
+                    out.push(o);
+                    return Ok(out);
+                }
                 if !is_native(s.bits()) {
                     return Err(TransError::unsupported(format!(
                         "llvm.{base} on i{} is not supported",
@@ -251,6 +342,17 @@ impl FuncTranslator<'_, '_> {
             }
             "smul.with.overflow" | "umul.with.overflow" => {
                 let s = self.arg_scalar_ty(args, 0)?;
+                if s.is_wide() {
+                    let (a, b) = self.wide_args64(base, args)?;
+                    let (r, o) = if base == "smul.with.overflow" {
+                        self.wide_smul_overflow(&a, &b)
+                    } else {
+                        self.wide_umul_overflow(&a, &b)
+                    };
+                    let mut out = self.wide_out(&r, 64);
+                    out.push(o);
+                    return Ok(out);
+                }
                 if !is_native(s.bits()) {
                     return Err(TransError::unsupported(format!(
                         "llvm.{base} on i{} is not supported",
@@ -265,6 +367,44 @@ impl FuncTranslator<'_, '_> {
             }
             "sadd.sat" | "ssub.sat" | "uadd.sat" | "usub.sat" => {
                 let s = self.arg_scalar_ty(args, 0)?;
+                if s.is_wide() {
+                    let (a, b) = self.wide_args64(base, args)?;
+                    let r = match base {
+                        "uadd.sat" => {
+                            let (r, c) = self.wide_add_carry(&a, &b);
+                            let all = self.wide_const(u64::MAX as u128, 2);
+                            self.wide_select(c, &all, &r)
+                        }
+                        "usub.sat" => {
+                            let r = self.wide_sub(&a, &b);
+                            let o = self.wide_icmp(IPred::Ult, 64, &a, &b);
+                            let zero = self.wide_const(0, 2);
+                            self.wide_select(o, &zero, &r)
+                        }
+                        _ => {
+                            let (r, o) = if base == "sadd.sat" {
+                                let r = self.wide_add(&a, &b);
+                                let o = self.wide_sadd_overflow(&a, &b, &r);
+                                (r, o)
+                            } else {
+                                let r = self.wide_sub(&a, &b);
+                                let o = self.wide_ssub_overflow(&a, &b, &r);
+                                (r, o)
+                            };
+                            // Saturate towards the sign of the first operand.
+                            let c31 = self.iconst(types::I32, 31);
+                            let sign = self.emit_sshr(a[1], c31, 32);
+                            let max_lo = self.iconst(types::I32, 0xffff_ffff);
+                            let max_hi = self.iconst(types::I32, 0x7fff_ffff);
+                            let sat = [
+                                self.b.ins().bxor(max_lo, sign),
+                                self.b.ins().bxor(max_hi, sign),
+                            ];
+                            self.wide_select(o, &sat, &r)
+                        }
+                    };
+                    return Ok(self.wide_out(&r, 64));
+                }
                 if !is_native(s.bits()) {
                     return Err(TransError::unsupported(format!(
                         "llvm.{base} on i{} is not supported",
@@ -303,19 +443,36 @@ impl FuncTranslator<'_, '_> {
             "scmp" | "ucmp" => {
                 let s = self.arg_scalar_ty(args, 0)?;
                 let rs = self.ret_scalar(ret_ty)?;
-                let a = self.use_scalar(&args[0].op)?;
-                let b = self.use_scalar(&args[1].op)?;
-                let (gt, lt) = if base == "scmp" {
+                let (pg, pl) = if base == "scmp" {
+                    (IPred::Sgt, IPred::Slt)
+                } else {
+                    (IPred::Ugt, IPred::Ult)
+                };
+                let (gt, lt) = if s.is_wide() {
+                    let a = self.use_wide(&args[0].op, s.bits())?;
+                    let b = self.use_wide(&args[1].op, s.bits())?;
                     (
-                        self.emit_icmp(IPred::Sgt, s.bits(), a, b),
-                        self.emit_icmp(IPred::Slt, s.bits(), a, b),
+                        self.wide_icmp(pg, s.bits(), &a, &b),
+                        self.wide_icmp(pl, s.bits(), &a, &b),
                     )
                 } else {
+                    let a = self.use_scalar(&args[0].op)?;
+                    let b = self.use_scalar(&args[1].op)?;
                     (
-                        self.emit_icmp(IPred::Ugt, s.bits(), a, b),
-                        self.emit_icmp(IPred::Ult, s.bits(), a, b),
+                        self.emit_icmp(pg, s.bits(), a, b),
+                        self.emit_icmp(pl, s.bits(), a, b),
                     )
                 };
+                if rs.is_wide() {
+                    // -1, 0 or 1, sign-extended over all parts.
+                    let r = self.b.ins().isub(gt, lt);
+                    let lo = self.emit_sextend(r, 8, types::I32);
+                    let c31 = self.iconst(types::I32, 31);
+                    let hi = self.emit_sshr(lo, c31, 32);
+                    let mut out = vec![lo];
+                    out.resize(rs.parts(), hi);
+                    return Ok(self.wide_out(&out, rs.bits()));
+                }
                 let gt = self.resize_unsigned(gt, types::I8, rs.clif());
                 let lt = self.resize_unsigned(lt, types::I8, rs.clif());
                 let r = self.b.ins().isub(gt, lt);
@@ -323,9 +480,13 @@ impl FuncTranslator<'_, '_> {
             }
             "ptrmask" => {
                 let p = self.use_scalar(&args[0].op)?;
-                let m = self.use_scalar(&args[1].op)?;
                 let ms = self.arg_scalar_ty(args, 1)?;
-                let m = self.resize_unsigned(m, ms.clif(), types::I32);
+                let m = if ms.is_wide() {
+                    self.use_wide(&args[1].op, ms.bits())?[0]
+                } else {
+                    let m = self.use_scalar(&args[1].op)?;
+                    self.resize_unsigned(m, ms.clif(), types::I32)
+                };
                 Ok(vec![self.b.ins().band(p, m)])
             }
             "memcpy" | "memcpy.inline" | "memmove" => {
@@ -388,30 +549,44 @@ impl FuncTranslator<'_, '_> {
         self.layout().scalar_of(ret_ty).map_err(TransError::from)
     }
 
-    /// A length argument (`i32` normally; `i64` lengths must be constants,
-    /// which the callers fold before getting here) as an i32 value.
+    /// A length argument as an i32 value (memory sizes are 32 bits; a wide
+    /// length only contributes its low part).
     fn length_arg(&mut self, args: &[CallArg], i: usize) -> TResult<Value> {
         let s = self.arg_scalar_ty(args, i)?;
+        if s.is_wide() {
+            return Ok(self.use_wide(&args[i].op, s.bits())?[0]);
+        }
         let v = self.use_scalar(&args[i].op)?;
         Ok(self.resize_unsigned(v, s.clif(), types::I32))
     }
 
-    /// Splits an i64 value into its (low, high) i32 halves.
-    fn split64(&mut self, x: Value) -> (Value, Value) {
-        let lo = self.b.ins().ireduce(types::I32, x);
-        let sh = self.iconst(types::I64, 32);
-        let hi = self.b.ins().ushr(x, sh);
-        let hi = self.b.ins().ireduce(types::I32, hi);
-        (lo, hi)
+    /// The first two arguments of a 64-bit intrinsic as parts (other wide
+    /// widths are rejected).
+    fn wide_args64(&mut self, base: &str, args: &[CallArg]) -> TResult<(Wide, Wide)> {
+        let s = self.arg_scalar_ty(args, 0)?;
+        if s.bits() != 64 {
+            return Err(TransError::unsupported(format!(
+                "llvm.{base} on i{} is not supported",
+                s.bits()
+            )));
+        }
+        let a = self.use_wide(&args[0].op, 64)?;
+        let b = self.use_wide(&args[1].op, 64)?;
+        Ok((a, b))
     }
 
-    /// Joins (low, high) i32 halves into an i64 value.
-    fn join64(&mut self, lo: Value, hi: Value) -> Value {
-        let lo = self.b.ins().uextend(types::I64, lo);
-        let hi = self.b.ins().uextend(types::I64, hi);
-        let sh = self.iconst(types::I64, 32);
-        let hi = self.b.ins().ishl(hi, sh);
-        self.b.ins().bor(lo, hi)
+    /// The first argument of an intrinsic on a two-part (33..64-bit) wide
+    /// integer as its `(lo, hi)` halves; wider integers are rejected.
+    fn wide_halves(&mut self, base: &str, args: &[CallArg]) -> TResult<(Value, Value)> {
+        let s = self.arg_scalar_ty(args, 0)?;
+        if s.parts() != 2 {
+            return Err(TransError::unsupported(format!(
+                "llvm.{base} on i{} is not supported",
+                s.bits()
+            )));
+        }
+        let w = self.use_wide(&args[0].op, s.bits())?;
+        Ok((w[0], w[1]))
     }
 
     /// Count of trailing zeros of an i32 value (32 for zero).

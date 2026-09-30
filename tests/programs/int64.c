@@ -1,4 +1,5 @@
-// 64-bit integer arithmetic (long long), which the Scry backend handles natively.
+// 64-bit integer arithmetic (long long): the Scry backend has no 64-bit values, so
+// llvm2clif lowers these to pairs of 32-bit operations.
 // CASES: 1 2 3 4 => 31625
 // CASES: -7 3 100 -100 => 10757
 // CASES: 123456789 987654321 0 0 => 28430810

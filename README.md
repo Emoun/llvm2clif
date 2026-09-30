@@ -193,10 +193,16 @@ and drops the function.
 LLVM IR as produced by clang/opt for C, restricted to what the Scry backend
 can execute:
 
-* Integer types `i1`…`i64` (widths other than 8/16/32/64 are emulated in the
-  next larger type), pointers (32 bits), structs and arrays (as values,
-  flattened; in memory with the target data layout, including bit-fields and
-  packed structs).
+* Integer types `i1`…`i128`: 8, 16 and 32 bits natively, other widths up
+  to 32 bits emulated in the next larger type. The Scry backend has no
+  64-bit values yet, so wider integers (`long long`, and the `i65`
+  arithmetic `opt` creates for overflow-free 64-bit loop computations) are
+  lowered to several 32-bit values with 32-bit operations: a `long long`
+  is two 32-bit values (and takes two argument or return slots in calls),
+  and 64-bit division and remainder call a small helper function that
+  llvm2clif adds to each object file. Also pointers (32 bits), structs and
+  arrays (as values, flattened; in memory with the target data layout,
+  including bit-fields and packed structs).
 * All integer arithmetic, bitwise and shift instructions, comparisons,
   `select`, casts, `phi`, `br`, `switch` (dense switches become jump tables),
   `unreachable`, `alloca` with constant size, `load`/`store`,
@@ -214,7 +220,9 @@ can execute:
   `scmp`/`ucmp`, `objectsize`, `is.constant`, `ptrmask`.
 
 Not supported (reported as errors, or skipped with `--skip-unsupported`):
-floating point, vector types, integers wider than 64 bits, variadic
+floating point, vector types, integers wider than 128 bits, division of
+integers wider than 64 bits, most intrinsics on integers wider than 64 bits,
+variadic
 functions (`va_arg`), variable-length arrays and other dynamic `alloca`,
 exceptions (`invoke`/`landingpad`), atomics beyond plain loads/stores,
 `blockaddress` (computed goto), inline assembly, thread-local storage,
@@ -235,10 +243,12 @@ because of bugs in the Scry Cranelift backend and in `scryer`. They are
 described, with minimal reproducers, in
 [docs/backend-issues/README.md](docs/backend-issues/README.md). The most
 important one (`echo.l` forwarding every queued operand) affects most
-non-trivial functions. `llvm2clif` contains workarounds for the issues that
-could be worked around (unsigned rewrites of signed operations, explicit zero
-bytes instead of `.bss`); the affected end-to-end tests are marked as known
-failures until the backend is fixed.
+non-trivial functions, and the backend's compile time explodes beyond a few
+hundred instructions in one basic block, which is what large functions with
+lowered 64-bit arithmetic produce. `llvm2clif` contains workarounds for the
+issues that could be worked around (unsigned rewrites of signed operations,
+explicit zero bytes instead of `.bss`); the affected end-to-end tests are
+marked as known failures until the backend is fixed.
 
 ## Tests
 
