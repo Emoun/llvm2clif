@@ -41,10 +41,11 @@ struct Cli {
     #[arg(long)]
     no_verify: bool,
 
-    /// Emit native signed comparisons and arithmetic shifts instead of
-    /// rewriting them into unsigned operations (see README, "Known issues").
+    /// Rewrite signed comparisons and arithmetic shifts into unsigned
+    /// operations, a workaround for older Scry backends (see README, "Known
+    /// issues").
     #[arg(long)]
-    native_signed_ops: bool,
+    signed_via_unsigned: bool,
 }
 
 fn main() {
@@ -73,7 +74,7 @@ fn run() -> anyhow::Result<()> {
         let options = llvm2clif::translate::Options {
             skip_unsupported: cli.skip_unsupported,
             verify: !cli.no_verify,
-            signed_via_unsigned: !cli.native_signed_ops,
+            signed_via_unsigned: cli.signed_via_unsigned,
         };
         let translated = llvm2clif::translate::translate_module(&module, &options)
             .map_err(|e| anyhow::anyhow!("{}: {e}", cli.input.display()))?;

@@ -21,15 +21,6 @@ use std::process::Command;
 /// `tests/interp.rs`). Each entry names the issue in
 /// `docs/backend-issues/README.md`.
 const KNOWN_BACKEND_FAILURES: &[(&str, &str)] = &[
-    ("arith", "1 (echo.l routing)"),
-    ("chars", "1 (echo.l routing)"),
-    ("compare", "1 (echo.l routing, simulator assertion)"),
-    ("globals", "1 (echo.l routing)"),
-    ("loops", "1 (echo.l routing)"),
-    ("malloc", "1 (echo.l routing)"),
-    ("memops", "1 (echo.l routing)"),
-    ("recursion", "1 (echo.l routing)"),
-    ("sort", "1 (echo.l routing)"),
     (
         "int64",
         "5 (backend loops forever on a reference distance over 1023)",

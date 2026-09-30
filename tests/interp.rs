@@ -79,36 +79,52 @@ fn run_program(name: &str) -> Result<(), String> {
     let src = std::fs::read_to_string(&ll_path)
         .map_err(|e| format!("{}: {e} (run update_ll.py)", ll_path.display()))?;
     let module = llvm2clif::llvm::parse_module(&src).map_err(|e| e.to_string())?;
-    let translated = translate_module(&module, &Options::default()).map_err(|e| e.to_string())?;
-    if let Some(why) = interpreter_limitation(&translated) {
-        eprintln!("skipped {name}: {why}");
-        return Ok(());
-    }
-    // The interpreter resolves calls by the displayed `%name`.
-    let mut store = FunctionStore::default();
-    for f in &translated.functions {
-        store.add(format!("%{}", f.name), &f.func);
-    }
     let mut failures = Vec::new();
-    for (args, expected) in cases {
-        let mut args = args;
-        args.resize(4, 0);
-        let state = InterpreterState::default().with_function_store(store.clone());
-        let mut interp = Interpreter::new(state);
-        let dv: Vec<DataValue> = args.iter().map(|a| DataValue::I32(*a)).collect();
-        match interp.call_by_name("%test", &dv) {
-            Ok(ControlFlow::Return(vals)) => match vals.first() {
-                Some(DataValue::I32(v)) if *v == expected => {}
-                other => failures.push(format!(
-                    "{name}({:?}): expected {expected}, got {other:?}",
+    // Both translation modes: native signed operations (the default) and the
+    // unsigned rewrite kept for older backends.
+    for signed_via_unsigned in [false, true] {
+        let options = Options {
+            signed_via_unsigned,
+            ..Options::default()
+        };
+        let mode = if signed_via_unsigned {
+            "signed-via-unsigned"
+        } else {
+            "native"
+        };
+        let translated = translate_module(&module, &options).map_err(|e| e.to_string())?;
+        if let Some(why) = interpreter_limitation(&translated) {
+            eprintln!("skipped {name}: {why}");
+            return Ok(());
+        }
+        // The interpreter resolves calls by the displayed `%name`.
+        let mut store = FunctionStore::default();
+        for f in &translated.functions {
+            store.add(format!("%{}", f.name), &f.func);
+        }
+        for (args, expected) in &cases {
+            let mut args = args.clone();
+            args.resize(4, 0);
+            let state = InterpreterState::default().with_function_store(store.clone());
+            let mut interp = Interpreter::new(state);
+            let dv: Vec<DataValue> = args.iter().map(|a| DataValue::I32(*a)).collect();
+            match interp.call_by_name("%test", &dv) {
+                Ok(ControlFlow::Return(vals)) => match vals.first() {
+                    Some(DataValue::I32(v)) if v == expected => {}
+                    other => failures.push(format!(
+                        "{name}[{mode}]({:?}): expected {expected}, got {other:?}",
+                        args
+                    )),
+                },
+                Ok(other) => failures.push(format!(
+                    "{name}[{mode}]({:?}): unexpected control flow {other:?}",
                     args
                 )),
-            },
-            Ok(other) => failures.push(format!(
-                "{name}({:?}): unexpected control flow {other:?}",
-                args
-            )),
-            Err(e) => failures.push(format!("{name}({:?}): interpreter error: {e:?}", args)),
+                Err(e) => failures.push(format!(
+                    "{name}[{mode}]({:?}): interpreter error: {e:?}",
+                    args
+                )),
+            }
         }
     }
     if failures.is_empty() {

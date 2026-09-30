@@ -1,8 +1,8 @@
 # Known issues in the Scry backend and simulator
 
 While developing llvm2clif, several problems surfaced in the Scry Cranelift
-backend ([Scry-arch/rust-wasmtime](https://github.com/Scry-arch/rust-wasmtime),
-commit `cfd59dc`) and the simulator ([Scry-arch/scryer](https://github.com/Scry-arch/scryer),
+backend ([Scry-arch/rust-wasmtime](https://github.com/Scry-arch/rust-wasmtime))
+and the simulator ([Scry-arch/scryer](https://github.com/Scry-arch/scryer),
 commit `6fc6ac9`). They are outside this repository, but they determine which
 programs run correctly end to end, so they are documented here together with
 minimal reproducers. The reproducer `.clif` files can be compiled directly:
@@ -17,11 +17,27 @@ The translator's own correctness is checked independently of the backend by
 running the translated CLIF in Cranelift's interpreter (`cargo test --test
 interp`), which passes for every program that the interpreter can run.
 
+Status with the backend revision llvm2clif builds against (`faad34b`, which
+followed `cfd59dc` where the issues were found):
+
+| issue | status at `faad34b` |
+|-------|---------------------|
+| 1. `echo.l` forwards every queued operand | fixed: the reproducer returns 36 and all affected test programs pass |
+| 2. type-tag conflicts on block parameters | fixed: the reproducer compiles; the translator's unsigned rewrite is now optional |
+| 3. `.bss` loaded as uninitialized memory | simulator unchanged, still worked around |
+| 4. no 64-bit values | unchanged, lowered by the translator |
+| 5. infinite loop on a reference distance over 1023 | still open: `far_reference_1025.clif` never finishes |
+| cubic compile time with block size | unchanged |
+
 ## 1. `echo.l` forwards every queued operand (wrong results)
 
-**Reproducer:** `echo_long_4params.clif` (expected 36, observed 30);
-`echo_long_2params.clif` is the same function without the two unused
-parameters and computes the right result.
+**Fixed in `faad34b`** (commits `58be9c8` and `faad34b`): the reproducer
+now returns 36 and every test program that used to fail because of it
+passes on the simulator. The description below is kept for reference.
+
+**Reproducer:** `echo_long_4params.clif` (expected 36, observed 30 with
+`cfd59dc`); `echo_long_2params.clif` is the same function without the two
+unused parameters and computes the right result.
 
 When a value has to travel further than the 31-instruction reach of an output
 reference, the backend bridges the distance with an `echo.l`. The ISA
@@ -46,8 +62,15 @@ translation of `compare_ready_queue.c`).
 
 ## 2. Type-tag conflicts on block parameters (compile-time panic)
 
+**Fixed in `faad34b`** (commit `3a4e61c`, "fixes issues with signedness
+conflicts", together with the ABI now treating a parameter without an
+extension attribute as unsigned): the reproducer compiles, and the whole
+test corpus passes on the simulator with native signed operations, which
+are therefore the translator's default now. The description below is kept
+for reference.
+
 **Reproducer:** `type_conflict_loop.clif` (translation of
-`type_conflict_loop.c` with `llvm2clif --native-signed-ops`):
+`type_conflict_loop.c` with native signed operations):
 
 ```
 panicked at cranelift/codegen/src/isa/scry/mod.rs:2468
@@ -62,11 +85,12 @@ dependencies calls `refine(..).unwrap()`) it panics instead. The classic
 trigger is a loop counter that is compared as a signed integer and also used
 in address arithmetic (unsigned).
 
-**Workaround in llvm2clif (default):** signed comparisons, arithmetic shifts,
-sign extensions, `abs`, `smax`/`smin` are expressed through unsigned
-operations (flipping the sign bit), and all function arguments and results
-use the unsigned ABI tag, so that signed demands rarely reach block
-parameters. `--native-signed-ops` disables the rewrite.
+**Workaround in llvm2clif (`--signed-via-unsigned`, formerly the default):**
+signed comparisons, arithmetic shifts, sign extensions, `abs`, `smax`/`smin`
+are expressed through unsigned operations (flipping the sign bit), and all
+function arguments and results use the unsigned ABI tag, so that signed
+demands rarely reach block parameters. It is kept for backends that still
+show the problem.
 
 ## 3. `.bss` is loaded as uninitialized memory (simulator)
 
@@ -94,6 +118,11 @@ working because small cases compiled and ran; that mapping is no longer
 used.)
 
 ## 5. Infinite loop when a value has to travel more than 1023 instructions
+
+**Still open in `faad34b`.** Commit `faad34b` ("fixed forwarding values
+through a long block") moves the bridging echo past the links of an echo
+chain, but the bridge is still inserted directly after the producer, so
+the reproducer below behaves exactly as before.
 
 **Reproducers:** `far_reference_1025.clif` (never finishes) and
 `far_reference_1020.clif` (the same function with one `iconst`/`iadd` pair

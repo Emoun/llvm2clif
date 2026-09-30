@@ -141,7 +141,8 @@ scry-cc [OPTIONS] <INPUT>... [-- <SIMULATOR ARGS>...]
   --heap-size <BYTES>  Size of the runtime's malloc heap (default 8192)
   --no-gc-sections     Keep unreferenced sections when linking
   --skip-unsupported   Skip functions using unsupported constructs (warning)
-  --native-signed-ops  Do not rewrite signed compares/shifts into unsigned ones
+  --signed-via-unsigned  Rewrite signed compares/shifts into unsigned ones
+                       (workaround for older Scry backends)
   -Wl,<ARG>            Pass <ARG> to the linker
   --run                Run the linked program on the simulator
   --clang/--opt/--wild/--scryer <PATH>   Tool locations (or SCRY_CLANG, SCRY_OPT,
@@ -238,17 +239,19 @@ below 64 KiB and deep recursion or large local arrays overflow the stack.
 
 ## Known issues in the Scry backend and simulator
 
-Several programs that translate correctly still misbehave on the simulator
-because of bugs in the Scry Cranelift backend and in `scryer`. They are
-described, with minimal reproducers, in
-[docs/backend-issues/README.md](docs/backend-issues/README.md). The most
-important one (`echo.l` forwarding every queued operand) affects most
-non-trivial functions, and the backend never finishes compiling a basic
-block in which a value has to travel more than 1023 instructions, which
-large functions with lowered 64-bit arithmetic reach. `llvm2clif` contains workarounds for the
-issues that could be worked around (unsigned rewrites of signed operations,
-explicit zero bytes instead of `.bss`); the affected end-to-end tests are
-marked as known failures until the backend is fixed.
+Problems found in the Scry Cranelift backend and in `scryer` are described,
+with minimal reproducers, in
+[docs/backend-issues/README.md](docs/backend-issues/README.md), together
+with their status for the backend revision this tool builds against. The
+two that broke most programs (`echo.l` forwarding every queued operand and a
+type-tag panic on block parameters) are fixed in that revision, and every
+test program now runs on the simulator except the two 64-bit ones: the
+backend still never finishes compiling a basic block in which a value has to
+travel more than 1023 instructions, which large functions with lowered
+64-bit arithmetic reach. Those tests are marked as known failures until the
+backend is fixed. `llvm2clif` keeps two workarounds: explicit zero bytes
+instead of `.bss` (the simulator does not zero-fill it) and the optional
+`--signed-via-unsigned` rewrite of signed operations.
 
 ## Tests
 

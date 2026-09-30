@@ -45,8 +45,9 @@ pub struct Config {
     pub keep_temps: bool,
     pub verbose: bool,
     pub skip_unsupported: bool,
-    /// Keep native signed comparisons/shifts (see `Options::signed_via_unsigned`).
-    pub native_signed_ops: bool,
+    /// Rewrite signed operations into unsigned ones (see
+    /// `Options::signed_via_unsigned`).
+    pub signed_via_unsigned: bool,
     pub clang: Option<PathBuf>,
     pub opt: Option<PathBuf>,
     pub wild: Option<PathBuf>,
@@ -73,7 +74,7 @@ impl Default for Config {
             keep_temps: false,
             verbose: false,
             skip_unsupported: false,
-            native_signed_ops: false,
+            signed_via_unsigned: false,
             clang: None,
             opt: None,
             wild: None,
@@ -413,7 +414,7 @@ fn translate_ll(cfg: &Config, ll: &Path) -> anyhow::Result<crate::translate::Cli
     let options = Options {
         skip_unsupported: cfg.skip_unsupported,
         verify: true,
-        signed_via_unsigned: !cfg.native_signed_ops,
+        signed_via_unsigned: cfg.signed_via_unsigned,
     };
     let translated = crate::translate::translate_module(&module, &options)
         .map_err(|e| anyhow!("{}: {e}", ll.display()))?;
