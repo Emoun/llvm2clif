@@ -32,11 +32,11 @@ const KNOWN_BACKEND_FAILURES: &[(&str, &str)] = &[
     ("sort", "1 (echo.l routing)"),
     (
         "int64",
-        "5 (backend compile time explodes on large straight-line functions)",
+        "5 (backend loops forever on a reference distance over 1023)",
     ),
     (
         "int64_ops",
-        "5 (backend compile time explodes on large straight-line functions)",
+        "5 (backend loops forever on a reference distance over 1023)",
     ),
 ];
 

@@ -93,53 +93,53 @@ each object file. (An earlier revision of these notes reported `i64` as
 working because small cases compiled and ran; that mapping is no longer
 used.)
 
-## 5. Compile time explodes with the size of a straight-line function
+## 5. Infinite loop when a value has to travel more than 1023 instructions
 
-**Reproducers:** `compile_cliff_13.clif` and `compile_cliff_14.clif`, the
-translations of a function with 13 and 14 chained `unsigned long long`
-multiply/shift/add statements (`compile_cliff_14.c` is the 14-statement
-source; the two differ by one statement). Both are a single basic block of
-32-bit instructions only.
+**Reproducers:** `far_reference_1025.clif` (never finishes) and
+`far_reference_1020.clif` (the same function with one `iconst`/`iadd` pair
+less; compiles in about 10 ms). Both are one basic block in which the first
+parameter is consumed only by the last instruction; the block in between is
+a chain of `iconst.i32 0x12345678` (a `const` + 3 `grow` chain, 4 reference
+units) and `iadd` (1 unit) pairs.
 
 ```sh
-llvm2clif docs/backend-issues/compile_cliff_13.clif -o ok.o    # about 3 s
-llvm2clif docs/backend-issues/compile_cliff_14.clif -o hang.o  # never finishes
+llvm2clif docs/backend-issues/far_reference_1020.clif -o ok.o    # 10 ms
+llvm2clif docs/backend-issues/far_reference_1025.clif -o hang.o  # never finishes
 ```
 
-Compile times of the same function for a growing number of statements
-(release build; the 32-bit version of the function, with `unsigned` instead
-of `unsigned long long`, compiles in 0.05 s for 80 statements):
+**Cause** (`insert_ref_distances` in `cranelift/codegen/src/isa/scry/mod.rs`):
+an output reference that does not fit its field (5 bits, or 10 bits for
+`echo.l`) is bridged by inserting an `EchoLong` *directly after the
+definition* (`bb.inst.insert(bb.inst.len() - inst_idx, MInst::EchoLong ..)`
+after `replace_all_uses`), and the block is then rescanned from the start
+(`continue 'a`). The echo sits next to the definition, so the distance its
+own output has to cover is exactly the distance the definition had; while
+that is at most 1023 one `echo.l` suffices, but beyond 1023 the next scan
+finds the echo's reference out of range too and bridges it with another
+adjacent echo, and so on. The block grows by one instruction per iteration
+and every iteration rebuilds the `use_pos` map and rescans the block, which
+is what a backtrace of the spinning process shows (`compile_function` ->
+`HashMap::from_iter` / `get_uses_mut`). The comment above the bridge
+("chaining further echoes if even that is exceeded") describes the intent;
+the chain would have to be placed so that each echo actually advances
+towards the use (for example at most 1023 units before it).
 
-| statements | instructions | compile time |
-|-----------:|-------------:|-------------:|
-| 5          | 247          | 0.28 s       |
-| 10         | 457          | 1.45 s       |
-| 11         | 499          | 1.87 s       |
-| 12         | 541          | 2.37 s       |
-| 13         | 583          | 2.87 s       |
-| 14         | 625          | > 2 minutes  |
+**How ordinary code gets there:** `insert_duplicates` puts all the `dup`s of
+a value that is used several times right after its definition, so the
+reference distance of a value used throughout a block equals the block's
+length in reference units, however close its individual uses are. The test
+program `int64.c` compiles to about 1000 machine instructions for the
+`test` function; its lowered 64-bit statements all use the same `int`
+parameter, whose `dup` chain ends in an `EchoLong` with a reference of
+1016 when the function has 13 such statements (2.9 s to compile) and would
+need more than 1023 with 14 (never finishes; replacing the shared parameter
+by a constant makes the 14-statement version compile in 3 s). This is why
+`int64.c` and `int64_ops.c` cannot run end to end although they pass in the
+Cranelift interpreter.
 
-The time is spent inside `ScryBackend::compile_function`
-(`cranelift/codegen/src/isa/scry/mod.rs`) itself, not in lowering or
-register allocation: a backtrace taken while it spins is
-
-```
-#0  __memset_avx512_unaligned_erms
-#1  hashbrown::raw::RawTableInner::fallible_with_capacity
-#2  hashbrown::raw::RawTable<(usize, u16)>::reserve_rehash
-#3  <HashMap<usize, u16> as FromIterator<(usize, u16)>>::from_iter
-#4  <ScryBackend as TargetIsa>::compile_function
-#5  cranelift_codegen::context::Context::compile_stencil
-#6  cranelift_codegen::context::Context::compile
-#7  cranelift_object::backend::ObjectModule::define_function_with_control_plane
-```
-
-i.e. a `HashMap<usize, u16>` is rebuilt from an iterator over and over
-inside a loop of the scheduling phase, whose cost grows super-linearly with
-the number of instructions and live values of the block (the 64-bit
-lowering produces many values with several uses each: carries, partial
-products and the spilled bits of shifts). This is what makes the test
-programs `int64.c` (`test`: 680 instructions) and `int64_ops.c` (`test`:
-1550 instructions) fail to compile end to end; every function in them of
-ordinary size compiles quickly, and both programs pass in the Cranelift
-interpreter.
+**Related performance problem:** the passes restart their scan of the whole
+block after every insertion, so compile time grows roughly cubically with
+block size even below the limit: a chain of 513 `iadd v, v` instructions
+(each value used twice, one `dup` each) takes 13 s, 1025 of them more than
+a minute, and a 386-instruction chain in which one value is used by every
+instruction (386 `dup`s) already crosses the 1023 limit above.

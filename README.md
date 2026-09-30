@@ -243,9 +243,9 @@ because of bugs in the Scry Cranelift backend and in `scryer`. They are
 described, with minimal reproducers, in
 [docs/backend-issues/README.md](docs/backend-issues/README.md). The most
 important one (`echo.l` forwarding every queued operand) affects most
-non-trivial functions, and the backend's compile time explodes beyond a few
-hundred instructions in one basic block, which is what large functions with
-lowered 64-bit arithmetic produce. `llvm2clif` contains workarounds for the
+non-trivial functions, and the backend never finishes compiling a basic
+block in which a value has to travel more than 1023 instructions, which
+large functions with lowered 64-bit arithmetic reach. `llvm2clif` contains workarounds for the
 issues that could be worked around (unsigned rewrites of signed operations,
 explicit zero bytes instead of `.bss`); the affected end-to-end tests are
 marked as known failures until the backend is fixed.
