@@ -17,17 +17,21 @@ The translator's own correctness is checked independently of the backend by
 running the translated CLIF in Cranelift's interpreter (`cargo test --test
 interp`), which passes for every program that the interpreter can run.
 
-Status with the backend revision llvm2clif builds against (`faad34b`, which
-followed `cfd59dc` where the issues were found):
+Status with the backend revision llvm2clif builds against (`21187c1`; the
+issues were found on `cfd59dc`, `faad34b` and `21187c1`):
 
-| issue | status at `faad34b` |
+| issue | status at `21187c1` |
 |-------|---------------------|
-| 1. `echo.l` forwards every queued operand | fixed: the reproducer returns 36 and all affected test programs pass |
-| 2. type-tag conflicts on block parameters | fixed: the reproducer compiles; the translator's unsigned rewrite is now optional |
+| 1. `echo.l` forwards every queued operand | fixed in `faad34b` |
+| 2. type-tag conflicts on block parameters | fixed in `faad34b` |
 | 3. `.bss` loaded as uninitialized memory | simulator unchanged, still worked around |
 | 4. no 64-bit values | unchanged, lowered by the translator |
-| 5. infinite loop on a reference distance over 1023 | still open: `far_reference_1025.clif` never finishes |
-| cubic compile time with block size | unchanged |
+| 5. infinite loop on a reference distance over 1023 | fixed in `21187c1` |
+| 6. nondeterministic code generation | open |
+| 7. type-analysis panic on `ireduce` followed by a signed use | open (in most compiles) |
+| 8. unsigned result tag of `smax`/`smin` | open (breaks `sort.c`, in some compiles) |
+| 9. unsigned result tag of `iabs` | open (breaks `absminmax.c`) |
+| compile time cubic in the block size | open |
 
 ## 1. `echo.l` forwards every queued operand (wrong results)
 
@@ -64,9 +68,10 @@ translation of `compare_ready_queue.c`).
 
 **Fixed in `faad34b`** (commit `3a4e61c`, "fixes issues with signedness
 conflicts", together with the ABI now treating a parameter without an
-extension attribute as unsigned): the reproducer compiles, and the whole
-test corpus passes on the simulator with native signed operations, which
-are therefore the translator's default now. The description below is kept
+extension attribute as unsigned): the reproducer compiles, and
+`tests/programs/signedness.c` (loop counters compared as signed and used as
+addresses, values compared both ways, signed shifts and division, sub-word
+values in memory) passes on the simulator. The description below is kept
 for reference.
 
 **Reproducer:** `type_conflict_loop.clif` (translation of
@@ -85,12 +90,9 @@ dependencies calls `refine(..).unwrap()`) it panics instead. The classic
 trigger is a loop counter that is compared as a signed integer and also used
 in address arithmetic (unsigned).
 
-**Workaround in llvm2clif (`--signed-via-unsigned`, formerly the default):**
-signed comparisons, arithmetic shifts, sign extensions, `abs`, `smax`/`smin`
-are expressed through unsigned operations (flipping the sign bit), and all
-function arguments and results use the unsigned ABI tag, so that signed
-demands rarely reach block parameters. It is kept for backends that still
-show the problem.
+The translator used to work around this by expressing signed operations
+through unsigned ones; that rewrite was removed once the backend handled
+the conflicts (the remaining tag problems are issues 7 to 9).
 
 ## 3. `.bss` is loaded as uninitialized memory (simulator)
 
@@ -119,56 +121,126 @@ used.)
 
 ## 5. Infinite loop when a value has to travel more than 1023 instructions
 
-**Still open in `faad34b`.** Commit `faad34b` ("fixed forwarding values
-through a long block") moves the bridging echo past the links of an echo
-chain, but the bridge is still inserted directly after the producer, so
-the reproducer below behaves exactly as before.
+**Fixed in `21187c1`** ("fixed issue with references longer than the reach
+of echo.l"): the bridging echoes are now placed as far from the producer
+as their reach allows, so chains of them cover any distance. Verified with
+the reproducers below and with far references of 1500, 2050, 4100 and
+8200 units, which compile in at most 0.7 s and return the right value on
+the simulator; the 64-bit test programs `int64.c` and `int64_ops.c` now
+compile (4 s and 15 s) and pass. The description below is kept for
+reference.
 
-**Reproducers:** `far_reference_1025.clif` (never finishes) and
+**Reproducers:** `far_reference_1025.clif` (used to never finish) and
 `far_reference_1020.clif` (the same function with one `iconst`/`iadd` pair
-less; compiles in about 10 ms). Both are one basic block in which the first
-parameter is consumed only by the last instruction; the block in between is
-a chain of `iconst.i32 0x12345678` (a `const` + 3 `grow` chain, 4 reference
-units) and `iadd` (1 unit) pairs.
+less). Both are one basic block in which the first parameter is consumed
+only by the last instruction; the block in between is a chain of
+`iconst.i32 0x12345678` (a `const` + 3 `grow` chain, 4 reference units) and
+`iadd` (1 unit) pairs.
+
+**Cause** (as of `faad34b`, `insert_ref_distances` in
+`cranelift/codegen/src/isa/scry/mod.rs`): an output reference that did not
+fit its field (5 bits, or 10 bits for `echo.l`) was bridged by inserting an
+`EchoLong` directly after the definition and rescanning the block. The echo
+sat next to the definition, so the distance its own output had to cover was
+exactly the distance the definition had; beyond 1023 the next scan found the
+echo's reference out of range too and bridged it with another adjacent
+echo, forever.
+
+**Compile time** still grows roughly cubically with the size of a basic
+block, because the passes restart their scan of the whole block after every
+insertion: a chain of 513 `iadd v, v` instructions (each value used twice)
+takes 14 s and 1025 of them 112 s; the 625-instruction block of 14 chained
+64-bit statements (which used to hang) takes 3.6 s and 20 statements 9.5 s.
+
+## 6. Code generation is not deterministic
+
+**Reproducer:** any function with more than one block or with re-tagging
+casts, e.g. `type_conflict_loop.clif`:
 
 ```sh
-llvm2clif docs/backend-issues/far_reference_1020.clif -o ok.o    # 10 ms
-llvm2clif docs/backend-issues/far_reference_1025.clif -o hang.o  # never finishes
+for i in 1 2 3 4 5 6; do llvm2clif docs/backend-issues/type_conflict_loop.clif -o $i.o; done
+sha256sum *.o    # six different objects
 ```
 
-**Cause** (`insert_ref_distances` in `cranelift/codegen/src/isa/scry/mod.rs`):
-an output reference that does not fit its field (5 bits, or 10 bits for
-`echo.l`) is bridged by inserting an `EchoLong` *directly after the
-definition* (`bb.inst.insert(bb.inst.len() - inst_idx, MInst::EchoLong ..)`
-after `replace_all_uses`), and the block is then rescanned from the start
-(`continue 'a`). The echo sits next to the definition, so the distance its
-own output has to cover is exactly the distance the definition had; while
-that is at most 1023 one `echo.l` suffices, but beyond 1023 the next scan
-finds the echo's reference out of range too and bridges it with another
-adjacent echo, and so on. The block grows by one instruction per iteration
-and every iteration rebuilds the `use_pos` map and rescans the block, which
-is what a backtrace of the spinning process shows (`compile_function` ->
-`HashMap::from_iter` / `get_uses_mut`). The comment above the bridge
-("chaining further echoes if even that is exceeded") describes the intent;
-the chain would have to be placed so that each echo actually advances
-towards the use (for example at most 1023 units before it).
+Of the 57 functions in the test corpus, 25 compile to several different
+objects over 4 compiles; the straight-line `far_reference_*.clif` functions
+always compile to the same bytes. The variants differ in the order of block
+parameters and jump arguments, in which copy of a duplicated value feeds
+which consumer, and in echo reference distances (see the vcode diff of two
+variants of `signedness`'s `idx_sum`, which differ in the `out` fields of
+`Duplicate`s, the sources of `Reorder`s and the argument order of
+`JumpTrigger`s).
 
-**How ordinary code gets there:** `insert_duplicates` puts all the `dup`s of
-a value that is used several times right after its definition, so the
-reference distance of a value used throughout a block equals the block's
-length in reference units, however close its individual uses are. The test
-program `int64.c` compiles to about 1000 machine instructions for the
-`test` function; its lowered 64-bit statements all use the same `int`
-parameter, whose `dup` chain ends in an `EchoLong` with a reference of
-1016 when the function has 13 such statements (2.9 s to compile) and would
-need more than 1023 with 14 (never finishes; replacing the shared parameter
-by a constant makes the 14-statement version compile in 3 s). This is why
-`int64.c` and `int64_ops.c` cannot run end to end although they pass in the
-Cranelift interpreter.
+**Cause:** iteration over `std` hash maps and sets, whose order is randomly
+seeded per process, in `cranelift/codegen/src/isa/scry/mod.rs`: the block
+worklist of `make_live_ins_explicit` (`worklist: HashSet<usize>` consumed
+with `worklist.iter().next()`), which decides the parameter orders; the
+grouping of re-tagging casts in `apply_cast_demands` (`demands.drain()`
+into a `HashMap`, then iterated); and the `reg_blocks: HashMap<Reg,
+HashSet<usize>>` worklists of the type analysis. This is why issue 7 panics
+in only some compiles and why issue 8 produces wrong code in only some
+compiles of larger functions (`bubble6.clif`, `sort.c`). Replacing these
+with `BTreeMap`/`BTreeSet` or `IndexMap`, or sorting before iterating,
+would make the output reproducible.
 
-**Related performance problem:** the passes restart their scan of the whole
-block after every insertion, so compile time grows roughly cubically with
-block size even below the limit: a chain of 513 `iadd v, v` instructions
-(each value used twice, one `dup` each) takes 13 s, 1025 of them more than
-a minute, and a 386-instruction chain in which one value is used by every
-instruction (386 `dup`s) already crosses the 1023 limit above.
+## 7. Type-analysis panic on `ireduce` followed by a signed use
+
+**Reproducer:** `reduce_sext.clif`, two instructions: `ireduce.i8` of a
+`uext` parameter, then `sextend.i32` of the result. Compiled ten times it
+panics in most of them (issue 6 decides which):
+
+```
+panicked at cranelift/codegen/src/isa/scry/mod.rs:2586
+Incompatible type requirements: rs_t Known(Uint(2)), rd_t Known(Int(0))
+```
+
+The `Reduce` arm of `type_analysis_phase` panics when the input is known
+unsigned and the output known signed (here: the sign extension demands a
+signed input), where the `Uextend`/`Sextend` arm pushes a re-tagging demand
+instead. The successful compiles show the intended code: a cast to `u8`, a
+cast to `i8`, then the extension. The C pattern is `(signed char)x` or
+`(short)x` for an `int` x (unsigned ABI tag) followed by any signed use,
+including passing it to a function with a `signext` parameter;
+`tests/programs/subword.c` is such a program and fails to compile in most
+runs.
+
+## 8. The result of `smax`/`smin` keeps the unsigned tag of its operands
+
+**Reproducers:** `minmax_chain.clif` (three instructions; deterministic),
+`sort4_minmax.clif` (clang's output for a bubble sort of the four
+arguments; deterministic) and `bubble6.clif` (a six-element bubble sort;
+wrong in about half of the compiles, see issue 6).
+
+```sh
+llvm2clif docs/backend-issues/minmax_chain.clif -o m.o
+wild -m elf32scry -e minmax_chain -z noexecstack -o m.elf m.o
+scryer m.elf --target=scry32-unknown-none-elf -i=4294967291u32 -i=4294967283u32
+# smin(smax(-5, -13), 0): expected -5 (4294967291u32), observed 0
+```
+
+**Cause** (vcode of `minmax_chain`): `smax` on unsigned-tagged operands is
+lowered as a `dup` of each operand, a `cast` to `i32` of one copy of each,
+a compare of the casts and a `pick` (select) between the *uncast* copies.
+The pick's output therefore carries the unsigned tag, while the type
+analysis records the `smax` result as signed and inserts no cast before the
+second `smin`, whose compare then runs unsigned on the machine. With
+signed-tagged operands (`sext` parameters) the same chain is correct, as
+are single `smax`/`smin`/`icmp`/`sshr`/`sdiv`/`sextend` on unsigned
+operands (verified with one function per operation). Clang turns every
+compare-and-swap into `smin`/`smax` chains, so this breaks sorting code:
+`tests/programs/sort.c`.
+
+## 9. The result of `iabs` keeps the unsigned tag on its negation path
+
+**Reproducer:** `iabs_min.clif`: `iabs` of a `uext` parameter followed by
+`sshr` by 1, with the input INT_MIN. Expected 0xC0000000 (-1073741824:
+iabs(INT_MIN) wraps to INT_MIN, tagged signed), observed 0x40000000, i.e.
+the shift was logical.
+
+**Cause** (vcode): the negation is computed as `0 - x` with an unsigned
+zero on an uncast copy of `x`, and the `pick` chooses between that
+unsigned difference and the uncast original, so the result is always
+unsigned-tagged; the type analysis records it as signed. Only INT_MIN is
+observable (any other magnitude fits in 31 bits), which is how
+`tests/programs/absminmax.c` fails: `clamp(INT_MIN)` returns 1000 instead
+of 10. With a `sext` parameter the same function is correct.

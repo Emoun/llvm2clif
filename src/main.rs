@@ -40,12 +40,6 @@ struct Cli {
     /// Do not run the Cranelift IR verifier on the translated functions.
     #[arg(long)]
     no_verify: bool,
-
-    /// Rewrite signed comparisons and arithmetic shifts into unsigned
-    /// operations, a workaround for older Scry backends (see README, "Known
-    /// issues").
-    #[arg(long)]
-    signed_via_unsigned: bool,
 }
 
 fn main() {
@@ -74,7 +68,6 @@ fn run() -> anyhow::Result<()> {
         let options = llvm2clif::translate::Options {
             skip_unsupported: cli.skip_unsupported,
             verify: !cli.no_verify,
-            signed_via_unsigned: cli.signed_via_unsigned,
         };
         let translated = llvm2clif::translate::translate_module(&module, &options)
             .map_err(|e| anyhow::anyhow!("{}: {e}", cli.input.display()))?;

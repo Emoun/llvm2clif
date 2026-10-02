@@ -81,7 +81,7 @@ impl FuncTranslator<'_, '_> {
                 }
                 let x = self.use_scalar(&args[0].op)?;
                 let xs = self.sext_in(x, s.bits());
-                let r = self.emit_iabs(xs, s.bits());
+                let r = self.b.ins().iabs(xs);
                 Ok(vec![self.canon(r, s.bits())])
             }
             "smax" | "smin" | "umax" | "umin" => {
@@ -108,8 +108,8 @@ impl FuncTranslator<'_, '_> {
                     (a, b)
                 };
                 let r = match base {
-                    "smax" => self.emit_sminmax(a, b, s.bits(), true),
-                    "smin" => self.emit_sminmax(a, b, s.bits(), false),
+                    "smax" => self.b.ins().smax(a, b),
+                    "smin" => self.b.ins().smin(a, b),
                     "umax" => self.b.ins().umax(a, b),
                     _ => self.b.ins().umin(a, b),
                 };
@@ -393,7 +393,7 @@ impl FuncTranslator<'_, '_> {
                             };
                             // Saturate towards the sign of the first operand.
                             let c31 = self.iconst(types::I32, 31);
-                            let sign = self.emit_sshr(a[1], c31, 32);
+                            let sign = self.b.ins().sshr(a[1], c31);
                             let max_lo = self.iconst(types::I32, 0xffff_ffff);
                             let max_hi = self.iconst(types::I32, 0x7fff_ffff);
                             let sat = [
@@ -432,7 +432,7 @@ impl FuncTranslator<'_, '_> {
                         };
                         // Saturate towards the sign of the first operand.
                         let shift = self.iconst(s.clif(), (s.bits() - 1) as u64);
-                        let sign = self.emit_sshr(a, shift, s.bits());
+                        let sign = self.b.ins().sshr(a, shift);
                         let max = self.iconst(s.clif(), mask(s.bits()) >> 1);
                         let sat = self.b.ins().bxor(max, sign);
                         self.b.ins().select(o, sat, r)
@@ -468,7 +468,7 @@ impl FuncTranslator<'_, '_> {
                     let r = self.b.ins().isub(gt, lt);
                     let lo = self.emit_sextend(r, 8, types::I32);
                     let c31 = self.iconst(types::I32, 31);
-                    let hi = self.emit_sshr(lo, c31, 32);
+                    let hi = self.b.ins().sshr(lo, c31);
                     let mut out = vec![lo];
                     out.resize(rs.parts(), hi);
                     return Ok(self.wide_out(&out, rs.bits()));
@@ -680,7 +680,7 @@ impl FuncTranslator<'_, '_> {
             };
             let expect = if signed {
                 let top = self.iconst(c, (w - 1) as u64);
-                self.emit_sshr(lo, top, w)
+                self.b.ins().sshr(lo, top)
             } else {
                 self.iconst(c, 0)
             };

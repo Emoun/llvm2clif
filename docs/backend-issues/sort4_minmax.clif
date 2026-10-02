@@ -1,0 +1,43 @@
+; Reproducer for issue 8 (see README.md in this directory) in the form clang
+; produces: a bubble sort of the four arguments, which `opt` turns into
+; smin/smax/select chains. Translation of
+;
+;   int test(int a, int b, int c, int d) {
+;       int arr[4] = { a, b, c, d };
+;       for (int i = 0; i < 3; i++)
+;           for (int j = 0; j < 3 - i; j++)
+;               if (arr[j] > arr[j + 1]) { int t = arr[j]; arr[j] = arr[j + 1]; arr[j + 1] = t; }
+;       return arr[0] * 1000 + arr[1] * 100 + arr[2] * 10 + arr[3];
+;   }
+;
+; Expected (deterministically wrong in every compile, on faad34b as well):
+;   test(13, -5, 0, 0) == -4987 (4294962309u32), observed -37
+;   test(-9, 20, -9, 7) == -9810, observed 6291
+;   test(4, 3, 2, 1) == 1234 (correct: no negative values)
+function %test(i32 uext, i32 uext, i32 uext, i32 uext) -> i32 uext system_v {
+block0(v0: i32, v1: i32, v2: i32, v3: i32):
+    v4 = smax v0, v1
+    v5 = smin v0, v1
+    v6 = smax v4, v2
+    v7 = smin v4, v2
+    v8 = smax v6, v3
+    v9 = smin v6, v3
+    v10 = icmp sgt v5, v2
+    v11 = select v10, v5, v7
+    v12 = select v10, v7, v5
+    v13 = smax v11, v9
+    v14 = smin v11, v9
+    v15 = smax v12, v14
+    v16 = smin v12, v14
+    v17 = iconst.i32 1000
+    v18 = imul v16, v17  ; v17 = 1000
+    v19 = iconst.i32 100
+    v20 = imul v15, v19  ; v19 = 100
+    v21 = iadd v20, v18
+    v22 = iconst.i32 10
+    v23 = imul v13, v22  ; v22 = 10
+    v24 = iadd v21, v23
+    v25 = iadd v24, v8
+    return v25
+}
+

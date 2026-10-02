@@ -1,0 +1,18 @@
+; Reproducer for the wrong result tag of `smax`/`smin` (see README.md in
+; this directory, issue 8). The result of the first `smax` is consumed by a
+; second signed min/max without a re-tagging cast, and the machine then
+; compares it as unsigned:
+;
+;   minmax_chain(-5, -13): expected smin(smax(-5, -13), 0) == -5, observed 0
+;   minmax_chain(5, 13):   expected 0, observed 0 (correct: no sign bit involved)
+;
+; `sort4_minmax.clif` and `bubble6.clif` are the same defect in code that
+; clang produces for a bubble sort (the compare-and-swap idiom becomes
+; smin/smax chains).
+function %minmax_chain(i32 uext, i32 uext) -> i32 uext system_v {
+block0(v0: i32, v1: i32):
+    v2 = smax v0, v1
+    v3 = iconst.i32 0
+    v4 = smin v2, v3
+    return v4
+}

@@ -11,7 +11,9 @@
 //! Programs listed in [`KNOWN_BACKEND_FAILURES`] fail because of issues in
 //! the Scry backend or simulator (see `docs/backend-issues/README.md`); their
 //! failures are reported but do not fail the test, and a program that starts
-//! passing is reported so that the list can be pruned.
+//! passing is reported so that the list can be pruned. The backend is not
+//! deterministic (issue 6 there), so a listed program may also pass in some
+//! runs.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -22,12 +24,13 @@ use std::process::Command;
 /// `docs/backend-issues/README.md`.
 const KNOWN_BACKEND_FAILURES: &[(&str, &str)] = &[
     (
-        "int64",
-        "5 (backend loops forever on a reference distance over 1023)",
+        "sort",
+        "8 (smin/smax result tag; wrong in some compiles, see 6)",
     ),
+    ("absminmax", "9 (iabs result tag on INT_MIN)"),
     (
-        "int64_ops",
-        "5 (backend loops forever on a reference distance over 1023)",
+        "subword",
+        "7 (type-analysis panic on ireduce, in most compiles)",
     ),
 ];
 

@@ -28,14 +28,6 @@ pub struct Options {
     pub skip_unsupported: bool,
     /// Run the Cranelift verifier on every translated function.
     pub verify: bool,
-    /// Express signed comparisons, arithmetic shifts and sign extensions
-    /// through unsigned operations (flipping the sign bit) and pass every
-    /// argument with the unsigned ABI tag. Scry values carry a signedness
-    /// tag, and older backends could not reconcile a loop-carried value that
-    /// is compared as signed but also used as an address (see
-    /// `docs/backend-issues`); the rewrite avoids the signed demand in the
-    /// common cases. Off by default since the backend was fixed.
-    pub signed_via_unsigned: bool,
 }
 
 impl Default for Options {
@@ -43,7 +35,6 @@ impl Default for Options {
         Options {
             skip_unsupported: false,
             verify: true,
-            signed_via_unsigned: false,
         }
     }
 }
@@ -229,7 +220,6 @@ impl<'m> ModuleCtx<'m> {
             &attrs,
             &f.ret_attrs,
             self.isa.default_call_conv(),
-            !self.options.signed_via_unsigned,
         )
     }
 

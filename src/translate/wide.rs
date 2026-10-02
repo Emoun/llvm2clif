@@ -95,7 +95,7 @@ impl FuncTranslator<'_, '_> {
         }
         let sh = self.iconst(types::I32, (32 - k) as u64);
         let t = self.b.ins().ishl(v, sh);
-        self.emit_sshr(t, sh, 32)
+        self.b.ins().sshr(t, sh)
     }
 
     /// Sign-extends the top part of canonical `bits`-bit parts across its
@@ -402,7 +402,7 @@ impl FuncTranslator<'_, '_> {
     /// Arithmetic right shift of sign-extended parts by `n`.
     pub(super) fn wide_ashr(&mut self, a: &[Value], n: Value) -> Wide {
         let c31 = self.iconst(types::I32, 31);
-        let sign = self.emit_sshr(a[a.len() - 1], c31, 32);
+        let sign = self.b.ins().sshr(a[a.len() - 1], c31);
         self.wide_shr(a, n, sign, true)
     }
 
@@ -423,7 +423,7 @@ impl FuncTranslator<'_, '_> {
                     let s = self.iconst(types::I32, nl as u64);
                     if src + 1 == k {
                         return if signed {
-                            self.emit_sshr(a[src], s, 32)
+                            self.b.ins().sshr(a[src], s)
                         } else {
                             self.b.ins().ushr(a[src], s)
                         };
@@ -445,7 +445,7 @@ impl FuncTranslator<'_, '_> {
                             let src = i + w;
                             let cand = if src + 1 == k {
                                 if signed {
-                                    self.emit_sshr(a[src], nl, 32)
+                                    self.b.ins().sshr(a[src], nl)
                                 } else {
                                     self.b.ins().ushr(a[src], nl)
                                 }
@@ -467,21 +467,10 @@ impl FuncTranslator<'_, '_> {
     /// Comparison of canonical `bits`-bit parts; the result is an `i8`.
     pub(super) fn wide_icmp(&mut self, pred: IPred, bits: u32, a: &[Value], b: &[Value]) -> Value {
         let k = a.len();
-        let (mut a, mut b, mut pred) = (a.to_vec(), b.to_vec(), pred);
+        let (mut a, mut b) = (a.to_vec(), b.to_vec());
         if pred.is_signed() {
             a = self.wide_sext_in(&a, bits);
             b = self.wide_sext_in(&b, bits);
-            if self.ctx.options.signed_via_unsigned {
-                a[k - 1] = self.flip_sign(a[k - 1], 32);
-                b[k - 1] = self.flip_sign(b[k - 1], 32);
-                pred = match pred {
-                    IPred::Sgt => IPred::Ugt,
-                    IPred::Sge => IPred::Uge,
-                    IPred::Slt => IPred::Ult,
-                    IPred::Sle => IPred::Ule,
-                    p => p,
-                };
-            }
         }
         match pred {
             IPred::Eq => {

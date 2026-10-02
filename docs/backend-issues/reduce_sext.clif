@@ -1,0 +1,18 @@
+; Reproducer for the type-analysis panic on `ireduce` followed by a signed
+; use (see README.md in this directory, issue 7). The backend is not
+; deterministic (issue 6), so compile it several times:
+;
+;   for i in 1 2 3 4 5 6 7 8 9 10; do llvm2clif reduce_sext.clif -o out.o; done
+;
+; Most compiles panic with
+;   Incompatible type requirements: rs_t Known(Uint(2)), rd_t Known(Int(0))
+; (the `Reduce` arm of `type_analysis_phase`); the others produce a correct
+; function (reduce_sext(511) == -1). The C pattern is `(signed char)x` for
+; an `int` x (unsigned ABI tag), then any signed use of the result, which
+; `subword.c` in tests/programs exercises.
+function %reduce_sext(i32 uext) -> i32 uext system_v {
+block0(v0: i32):
+    v1 = ireduce.i8 v0
+    v2 = sextend.i32 v1
+    return v2
+}

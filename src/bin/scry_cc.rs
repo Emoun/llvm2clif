@@ -26,8 +26,6 @@ Options:
   --heap-size <BYTES>  Size of the runtime's heap (default 8192)
   --no-gc-sections     Keep unreferenced sections when linking
   --skip-unsupported   Skip functions using unsupported constructs (warning)
-  --signed-via-unsigned  Rewrite signed compares/shifts into unsigned ones
-                       (workaround for older Scry backends)
   -Wl,<ARG>            Pass <ARG> to the linker
   --run                Run the linked program on the simulator; arguments
                        after `--` are passed to scryer (e.g. -i 5i32)
@@ -94,7 +92,6 @@ fn parse_args(args: Vec<OsString>) -> Result<Option<Config>, String> {
             }
             "--no-gc-sections" => cfg.gc_sections = false,
             "--skip-unsupported" => cfg.skip_unsupported = true,
-            "--signed-via-unsigned" => cfg.signed_via_unsigned = true,
             "--run" => run_args = Some(Vec::new()),
             "--clang" => cfg.clang = Some(PathBuf::from(value("--clang")?)),
             "--opt" => cfg.opt = Some(PathBuf::from(value("--opt")?)),

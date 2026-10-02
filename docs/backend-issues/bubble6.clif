@@ -1,0 +1,139 @@
+; Issue 8 (see README.md in this directory) in its nondeterministic form: a
+; bubble sort of six pseudo-random elements (tests/programs/sort.c reduced).
+; Compile it several times; about half of the objects compute
+; test(13, -5, 0, 0) == 4095 instead of 5084 (the other inputs of the
+; original program pass in every variant). Which compiles are wrong depends
+; on the hash-ordered iteration described in issue 6, which decides where
+; the re-tagging casts of the smin/smax chains are placed. Source:
+;
+;   int test(int a, int b, int c, int d) {
+;       int arr[6];
+;       unsigned seed = (unsigned)a * 2654435761u + 12345u;
+;       for (int i = 0; i < 6; i++) { seed = seed * 1103515245u + 12345u; arr[i] = (int)(seed >> 16) % 100 + b; }
+;       for (int i = 0; i < 5; i++)
+;           for (int j = 0; j < 5 - i; j++)
+;               if (arr[j] > arr[j + 1]) { int t = arr[j]; arr[j] = arr[j + 1]; arr[j + 1] = t; }
+;       int r = 0;
+;       for (int i = 1; i < 6; i++) r += (arr[i - 1] <= arr[i]);
+;       return r * 1000 + arr[0] + arr[5];
+;   }
+function %test(i32 uext, i32 uext, i32 uext, i32 uext) -> i32 uext system_v {
+block0(v0: i32, v1: i32, v2: i32, v3: i32):
+    v4 = iconst.i32 0x5498_be5d
+    v5 = imul v0, v4  ; v4 = 0x5498_be5d
+    v6 = iconst.i32 -740551042
+    v7 = iadd v5, v6  ; v6 = -740551042
+    v8 = iconst.i32 16
+    v9 = ushr v7, v8  ; v8 = 16
+    v10 = ireduce.i16 v9
+    v11 = iconst.i16 100
+    v12 = urem v10, v11  ; v11 = 100
+    v13 = uextend.i32 v12
+    v14 = iadd v13, v1
+    v15 = iconst.i32 0x41c6_4e6d
+    v16 = imul v7, v15  ; v15 = 0x41c6_4e6d
+    v17 = iconst.i32 0x3039
+    v18 = iadd v16, v17  ; v17 = 0x3039
+    v19 = iconst.i32 16
+    v20 = ushr v18, v19  ; v19 = 16
+    v21 = ireduce.i16 v20
+    v22 = iconst.i16 100
+    v23 = urem v21, v22  ; v22 = 100
+    v24 = uextend.i32 v23
+    v25 = iadd v24, v1
+    v26 = iconst.i32 0x41c6_4e6d
+    v27 = imul v18, v26  ; v26 = 0x41c6_4e6d
+    v28 = iconst.i32 0x3039
+    v29 = iadd v27, v28  ; v28 = 0x3039
+    v30 = iconst.i32 16
+    v31 = ushr v29, v30  ; v30 = 16
+    v32 = ireduce.i16 v31
+    v33 = iconst.i16 100
+    v34 = urem v32, v33  ; v33 = 100
+    v35 = uextend.i32 v34
+    v36 = iadd v35, v1
+    v37 = iconst.i32 0x41c6_4e6d
+    v38 = imul v29, v37  ; v37 = 0x41c6_4e6d
+    v39 = iconst.i32 0x3039
+    v40 = iadd v38, v39  ; v39 = 0x3039
+    v41 = iconst.i32 16
+    v42 = ushr v40, v41  ; v41 = 16
+    v43 = ireduce.i16 v42
+    v44 = iconst.i16 100
+    v45 = urem v43, v44  ; v44 = 100
+    v46 = uextend.i32 v45
+    v47 = iadd v46, v1
+    v48 = iconst.i32 0x41c6_4e6d
+    v49 = imul v40, v48  ; v48 = 0x41c6_4e6d
+    v50 = iconst.i32 0x3039
+    v51 = iadd v49, v50  ; v50 = 0x3039
+    v52 = iconst.i32 16
+    v53 = ushr v51, v52  ; v52 = 16
+    v54 = ireduce.i16 v53
+    v55 = iconst.i16 100
+    v56 = urem v54, v55  ; v55 = 100
+    v57 = uextend.i32 v56
+    v58 = iadd v57, v1
+    v59 = iconst.i32 0x41c6_4e6d
+    v60 = imul v51, v59  ; v59 = 0x41c6_4e6d
+    v61 = iconst.i32 0x3039
+    v62 = iadd v60, v61  ; v61 = 0x3039
+    v63 = iconst.i32 16
+    v64 = ushr v62, v63  ; v63 = 16
+    v65 = ireduce.i16 v64
+    v66 = iconst.i16 100
+    v67 = urem v65, v66  ; v66 = 100
+    v68 = uextend.i32 v67
+    v69 = iadd v68, v1
+    v70 = icmp ugt v12, v23
+    v71 = select v70, v14, v25
+    v72 = select v70, v25, v14
+    v73 = smax v71, v36
+    v74 = smin v71, v36
+    v75 = smax v73, v47
+    v76 = smin v73, v47
+    v77 = smax v75, v58
+    v78 = smin v75, v58
+    v79 = smax v77, v69
+    v80 = smin v77, v69
+    v81 = smax v72, v74
+    v82 = smin v72, v74
+    v83 = smax v81, v76
+    v84 = smin v81, v76
+    v85 = smax v83, v78
+    v86 = smin v83, v78
+    v87 = smax v85, v80
+    v88 = smin v85, v80
+    v89 = icmp slt v76, v82
+    v90 = select v89, v82, v84
+    v91 = select v89, v84, v82
+    v92 = smax v90, v86
+    v93 = smin v90, v86
+    v94 = smax v92, v88
+    v95 = smin v92, v88
+    v96 = smax v91, v93
+    v97 = smin v91, v93
+    v98 = smin v96, v95
+    v99 = icmp slt v95, v97
+    v100 = select v99, v97, v98
+    v101 = select v99, v98, v97
+    v102 = icmp sgt v101, v100
+    v103 = iconst.i32 1
+    v104 = iconst.i32 2
+    v105 = select v102, v103, v104  ; v103 = 1, v104 = 2
+    v106 = icmp sle v96, v94
+    v107 = uextend.i32 v106
+    v108 = iadd v105, v107
+    v109 = icmp sle v92, v87
+    v110 = uextend.i32 v109
+    v111 = iadd v108, v110
+    v112 = icmp sle v85, v79
+    v113 = uextend.i32 v112
+    v114 = iadd v111, v113
+    v115 = iconst.i32 1000
+    v116 = imul v114, v115  ; v115 = 1000
+    v117 = iadd v101, v116
+    v118 = iadd v117, v79
+    return v118
+}
+

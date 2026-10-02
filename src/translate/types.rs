@@ -283,17 +283,15 @@ impl<'m> Layout<'m> {
         param_attrs: &[ParamAttrs],
         ret_attrs: &ParamAttrs,
         call_conv: CallConv,
-        honor_signext: bool,
     ) -> Result<Signature, String> {
         // Scry values carry a signedness tag, and the ABI extension attribute
         // is what tells the backend which tag a parameter or result has on
-        // both sides of a call. Everything is passed with an unsigned tag so
-        // that callers and callees always agree; `signext` (which clang puts
-        // on sub-word signed integers) is only honored when signed
-        // operations are emitted natively. The parts of a wide integer are
-        // always unsigned (their canonical form is zero-extended).
+        // both sides of a call: `signext` (which clang puts on sub-word
+        // signed integers) gives a signed tag, everything else an unsigned
+        // one. The parts of a wide integer are always unsigned (their
+        // canonical form is zero-extended).
         let ext = |a: Option<&ParamAttrs>, leaf: &Scalar| {
-            if !leaf.part && honor_signext && a.is_some_and(|a| a.signext) {
+            if !leaf.part && a.is_some_and(|a| a.signext) {
                 ArgumentExtension::Sext
             } else {
                 ArgumentExtension::Uext

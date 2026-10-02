@@ -1,0 +1,12 @@
+; Reproducer for the unsigned result of `iabs` on its negation path (see
+; README.md in this directory, issue 9): iabs(INT_MIN) must wrap to INT_MIN
+; (0x80000000 with a signed tag), so the arithmetic shift yields
+; 0xC0000000 (-1073741824). Observed: 0x40000000, i.e. the shift was
+; logical because the value came out of the negation tagged u32.
+function %iabs_min(i32 uext, i32 uext) -> i32 uext system_v {
+block0(v0: i32, v1: i32):
+    v2 = iabs v0
+    v3 = iconst.i32 1
+    v4 = sshr v2, v3
+    return v4
+}

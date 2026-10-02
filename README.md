@@ -141,8 +141,6 @@ scry-cc [OPTIONS] <INPUT>... [-- <SIMULATOR ARGS>...]
   --heap-size <BYTES>  Size of the runtime's malloc heap (default 8192)
   --no-gc-sections     Keep unreferenced sections when linking
   --skip-unsupported   Skip functions using unsupported constructs (warning)
-  --signed-via-unsigned  Rewrite signed compares/shifts into unsigned ones
-                       (workaround for older Scry backends)
   -Wl,<ARG>            Pass <ARG> to the linker
   --run                Run the linked program on the simulator
   --clang/--opt/--wild/--scryer <PATH>   Tool locations (or SCRY_CLANG, SCRY_OPT,
@@ -243,15 +241,16 @@ Problems found in the Scry Cranelift backend and in `scryer` are described,
 with minimal reproducers, in
 [docs/backend-issues/README.md](docs/backend-issues/README.md), together
 with their status for the backend revision this tool builds against. The
-two that broke most programs (`echo.l` forwarding every queued operand and a
-type-tag panic on block parameters) are fixed in that revision, and every
-test program now runs on the simulator except the two 64-bit ones: the
-backend still never finishes compiling a basic block in which a value has to
-travel more than 1023 instructions, which large functions with lowered
-64-bit arithmetic reach. Those tests are marked as known failures until the
-backend is fixed. `llvm2clif` keeps two workarounds: explicit zero bytes
-instead of `.bss` (the simulator does not zero-fill it) and the optional
-`--signed-via-unsigned` rewrite of signed operations.
+issues that used to break most programs (`echo.l` routing, a type-tag panic
+on block parameters, and an infinite loop on long reference distances) are
+fixed in that revision, and 17 of the 20 test programs run on the
+simulator. Still open there: code generation is not deterministic, the
+results of `smax`/`smin` and `iabs` keep an unsigned tag (which breaks
+sorting code and `abs(INT_MIN)`), and a `(signed char)x` conversion of an
+`int` followed by a signed use panics the backend in most compiles. The
+affected tests are marked as known failures. `llvm2clif` keeps one
+workaround: explicit zero bytes instead of `.bss`, which the simulator does
+not zero-fill.
 
 ## Tests
 

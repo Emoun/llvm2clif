@@ -141,8 +141,8 @@ pub(super) struct FuncTranslator<'a, 'm> {
     funcrefs: HashMap<(String, Signature), FuncRef>,
     sigrefs: HashMap<Signature, SigRef>,
     gvs: HashMap<(String, i64), GlobalValue>,
-    /// Known constant values (results of `iconst`), used to fold the
-    /// sign-bit flips of rewritten signed operations.
+    /// Known constant values (results of `iconst`), used to specialize the
+    /// shifts of wide integers by constant amounts.
     const_vals: HashMap<Value, u64>,
     /// Runtime helper functions referenced by the translation.
     runtime_imports: &'a mut BTreeMap<String, Signature>,
@@ -253,20 +253,6 @@ impl<'a, 'm> FuncTranslator<'a, 'm> {
         self.const_vals.get(&v).copied()
     }
 
-    /// Flips the sign bit of a container value of `bits` bits, so that
-    /// unsigned comparisons of the results order like signed comparisons of
-    /// the inputs.
-    pub(super) fn flip_sign(&mut self, v: Value, bits: u32) -> Value {
-        let c = container(bits);
-        let s = 1u64 << (c.bits() - 1);
-        if let Some(k) = self.const_vals.get(&v) {
-            let k = *k;
-            return self.iconst(c, k ^ s);
-        }
-        let sv = self.iconst(c, s);
-        self.b.ins().bxor(v, sv)
-    }
-
     /// Masks a container value down to `bits` bits (no-op for native widths).
     pub(super) fn canon(&mut self, v: Value, bits: u32) -> Value {
         if is_native(bits) {
@@ -274,21 +260,6 @@ impl<'a, 'm> FuncTranslator<'a, 'm> {
         }
         let m = self.iconst(container(bits), mask(bits));
         self.b.ins().band(v, m)
-    }
-
-    /// Arithmetic right shift of a container value of `bits` bits by the
-    /// amount `n` (a value), honoring the `signed_via_unsigned` option.
-    pub(super) fn emit_sshr(&mut self, v: Value, n: Value, bits: u32) -> Value {
-        if !self.ctx.options.signed_via_unsigned {
-            return self.b.ins().sshr(v, n);
-        }
-        // sshr(x, n) == ((x ^ S) >>u n) - (S >>u n), S = sign bit.
-        let c = container(bits);
-        let flipped = self.flip_sign(v, bits);
-        let shifted = self.b.ins().ushr(flipped, n);
-        let sbit = self.iconst(c, 1u64 << (c.bits() - 1));
-        let bias = self.b.ins().ushr(sbit, n);
-        self.b.ins().isub(shifted, bias)
     }
 
     /// Sign-extends the low `bits` bits of a container value across the whole
@@ -300,7 +271,7 @@ impl<'a, 'm> FuncTranslator<'a, 'm> {
         let c = container(bits);
         let sh = self.iconst(c, (c.bits() - bits) as u64);
         let t = self.b.ins().ishl(v, sh);
-        self.emit_sshr(t, sh, c.bits())
+        self.b.ins().sshr(t, sh)
     }
 
     /// Sign-extends a container value of `from_bits` bits to the container
@@ -314,15 +285,7 @@ impl<'a, 'm> FuncTranslator<'a, 'm> {
         if fc.bits() > to.bits() {
             return self.b.ins().ireduce(to, s);
         }
-        if !self.ctx.options.signed_via_unsigned {
-            return self.b.ins().sextend(to, s);
-        }
-        // Zero-extend, then shift the sign bit up and arithmetically back
-        // down using unsigned operations only.
-        let wide = self.b.ins().uextend(to, s);
-        let sh = self.iconst(to, (to.bits() - fc.bits()) as u64);
-        let up = self.b.ins().ishl(wide, sh);
-        self.emit_sshr(up, sh, to.bits())
+        self.b.ins().sextend(to, s)
     }
 
     /// Converts a canonical `bits`-bit value to a sign-extended i32.
@@ -630,7 +593,7 @@ impl<'a, 'm> FuncTranslator<'a, 'm> {
             BinOp::LShr => self.b.ins().ushr(l, r),
             BinOp::AShr => {
                 let s = self.sext_in(l, bits);
-                let v = self.emit_sshr(s, r, bits);
+                let v = self.b.ins().sshr(s, r);
                 self.canon(v, bits)
             }
             BinOp::UDiv => self.b.ins().udiv(l, r),
@@ -654,51 +617,12 @@ impl<'a, 'm> FuncTranslator<'a, 'm> {
         })
     }
 
-    /// Absolute value of a sign-extended container value.
-    pub(super) fn emit_iabs(&mut self, v: Value, bits: u32) -> Value {
-        if !self.ctx.options.signed_via_unsigned {
-            return self.b.ins().iabs(v);
-        }
-        // m = 0 - (v >>u (w-1)) is all ones for negative v; abs = (v ^ m) - m.
-        let c = container(bits);
-        let sh = self.iconst(c, (c.bits() - 1) as u64);
-        let sign = self.b.ins().ushr(v, sh);
-        let m = self.b.ins().ineg(sign);
-        let x = self.b.ins().bxor(v, m);
-        self.b.ins().isub(x, m)
-    }
-
-    /// Signed minimum/maximum of sign-extended container values.
-    pub(super) fn emit_sminmax(&mut self, a: Value, b: Value, bits: u32, max: bool) -> Value {
-        if !self.ctx.options.signed_via_unsigned {
-            return if max {
-                self.b.ins().smax(a, b)
-            } else {
-                self.b.ins().smin(a, b)
-            };
-        }
-        let c = self.emit_icmp(if max { IPred::Sgt } else { IPred::Slt }, bits, a, b);
-        self.b.ins().select(c, a, b)
-    }
-
     pub(super) fn emit_icmp(&mut self, pred: IPred, bits: u32, l: Value, r: Value) -> Value {
-        let (mut l, mut r) = if pred.is_signed() {
+        let (l, r) = if pred.is_signed() {
             (self.sext_in(l, bits), self.sext_in(r, bits))
         } else {
             (l, r)
         };
-        let mut pred = pred;
-        if pred.is_signed() && self.ctx.options.signed_via_unsigned {
-            l = self.flip_sign(l, bits);
-            r = self.flip_sign(r, bits);
-            pred = match pred {
-                IPred::Sgt => IPred::Ugt,
-                IPred::Sge => IPred::Uge,
-                IPred::Slt => IPred::Ult,
-                IPred::Sle => IPred::Ule,
-                p => p,
-            };
-        }
         let cc = match pred {
             IPred::Eq => IntCC::Equal,
             IPred::Ne => IntCC::NotEqual,
@@ -809,7 +733,7 @@ impl<'a, 'm> FuncTranslator<'a, 'm> {
             if kt > w.len() {
                 let fill = if sext {
                     let c31 = self.iconst(types::I32, 31);
-                    self.emit_sshr(w[w.len() - 1], c31, 32)
+                    self.b.ins().sshr(w[w.len() - 1], c31)
                 } else {
                     self.iconst(types::I32, 0)
                 };
@@ -831,7 +755,7 @@ impl<'a, 'm> FuncTranslator<'a, 'm> {
         let (lo, fill) = if sext {
             let lo = self.sext_to_i32(v, fb);
             let c31 = self.iconst(types::I32, 31);
-            (lo, self.emit_sshr(lo, c31, 32))
+            (lo, self.b.ins().sshr(lo, c31))
         } else {
             (self.zext_to_i32(v, fb), self.iconst(types::I32, 0))
         };
@@ -1515,7 +1439,6 @@ impl<'a, 'm> FuncTranslator<'a, 'm> {
             &attrs,
             ret_attrs,
             self.ctx.isa.default_call_conv(),
-            !self.ctx.options.signed_via_unsigned,
         )?;
 
         let mut argvals = Vec::new();
