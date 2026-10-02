@@ -1,0 +1,269 @@
+; Reproducer for operand routing errors in some compiles (see README.md in
+; this directory, issue 8). Translation of
+;
+;   static int bsearch_int(const int *a, int n, int key) {
+;       int lo = 0, hi = n - 1;
+;       while (lo <= hi) {
+;           int mid = lo + (hi - lo) / 2;
+;           if (a[mid] == key) return mid;
+;           if (a[mid] < key) lo = mid + 1; else hi = mid - 1;
+;       }
+;       return -1;
+;   }
+;   int test(int a, int b, int c, int d) {
+;       int arr[20];
+;       for (int i = 0; i < 20; i++) arr[i] = ((i * 7 + a) % 11) * 9 + b;
+;       for (int j = 0; j < 19; j++) if (arr[j] > arr[j + 1]) { int t = arr[j]; arr[j] = arr[j + 1]; arr[j + 1] = t; }
+;       int r = 0;
+;       for (int i = 1; i < 20; i++) r += (arr[i - 1] <= arr[i]);
+;       r += bsearch_int(arr, 20, 1000) == -1;
+;       return r * 1000 + arr[0] + arr[19];
+;   }
+;
+; Expected: test(0, 0, 0, 0) == 9090, test(7, 3, 0, 0) == 9123,
+; test(13, -5, 0, 0) == 9098 (4294967...: -5 is passed as 4294967291u32).
+; Compile it several times: about a quarter of the objects fail on the
+; simulator with "Alu2 instruction missing first operand", the assertion
+; `ready_peek.next().is_some()` of the Pick instruction, "found Nan or Nar",
+; or return wrong values; the rest are correct. The same happens to
+; tests/programs/sort.c (about 40 % of its compiles).
+function %test(i32 uext, i32 uext, i32 uext, i32 uext) -> i32 uext system_v {
+    ss0 = explicit_slot 80, align = 4
+
+block0(v0: i32, v1: i32, v2: i32, v3: i32):
+    v11 = iconst.i32 0
+    jump block1(v11)  ; v11 = 0
+
+block1(v4: i32):
+    v12 = iconst.i32 7
+    v13 = imul v4, v12  ; v12 = 7
+    v14 = iadd v13, v0
+    v15 = iconst.i32 11
+    v16 = srem v14, v15  ; v15 = 11
+    v17 = iconst.i32 9
+    v18 = imul v16, v17  ; v17 = 9
+    v19 = iadd v18, v1
+    v20 = stack_addr.i32 ss0
+    v21 = iconst.i32 2
+    v22 = ishl v4, v21  ; v21 = 2
+    v23 = iadd v20, v22
+    store notrap v19, v23
+    v24 = iconst.i32 1
+    v25 = iadd v4, v24  ; v24 = 1
+    v26 = iconst.i32 20
+    v27 = icmp eq v25, v26  ; v26 = 20
+    brif v27, block2, block1(v25)
+
+block2:
+    v28 = stack_addr.i32 ss0
+    v29 = load.i32 notrap v28
+    v30 = iconst.i32 0
+    jump block3(v29, v30)  ; v30 = 0
+
+block3(v5: i32, v6: i32):
+    v31 = iconst.i32 1
+    v32 = iadd v6, v31  ; v31 = 1
+    v33 = stack_addr.i32 ss0
+    v34 = iconst.i32 2
+    v35 = ishl v32, v34  ; v34 = 2
+    v36 = iadd v33, v35
+    v37 = load.i32 notrap v36
+    v38 = icmp sgt v5, v37
+    brif v38, block4, block5(v37)
+
+block4:
+    v39 = stack_addr.i32 ss0
+    v40 = iconst.i32 2
+    v41 = ishl.i32 v6, v40  ; v40 = 2
+    v42 = iadd v39, v41
+    store.i32 notrap v37, v42
+    store.i32 notrap v5, v36
+    jump block5(v5)
+
+block5(v7: i32):
+    v43 = iconst.i32 19
+    v44 = icmp.i32 eq v32, v43  ; v43 = 19
+    brif v44, block6, block3(v7, v32)
+
+block6:
+    v45 = stack_addr.i32 ss0
+    v46 = load.i32 notrap v45
+    v47 = stack_addr.i32 ss0
+    v48 = iconst.i32 4
+    v49 = iadd v47, v48  ; v48 = 4
+    v50 = load.i32 notrap v49
+    v51 = stack_addr.i32 ss0
+    v52 = iconst.i32 8
+    v53 = iadd v51, v52  ; v52 = 8
+    v54 = load.i32 notrap v53
+    v55 = stack_addr.i32 ss0
+    v56 = iconst.i32 12
+    v57 = iadd v55, v56  ; v56 = 12
+    v58 = load.i32 notrap v57
+    v59 = stack_addr.i32 ss0
+    v60 = iconst.i32 16
+    v61 = iadd v59, v60  ; v60 = 16
+    v62 = load.i32 notrap v61
+    v63 = stack_addr.i32 ss0
+    v64 = iconst.i32 20
+    v65 = iadd v63, v64  ; v64 = 20
+    v66 = load.i32 notrap v65
+    v67 = stack_addr.i32 ss0
+    v68 = iconst.i32 24
+    v69 = iadd v67, v68  ; v68 = 24
+    v70 = load.i32 notrap v69
+    v71 = stack_addr.i32 ss0
+    v72 = iconst.i32 28
+    v73 = iadd v71, v72  ; v72 = 28
+    v74 = load.i32 notrap v73
+    v75 = stack_addr.i32 ss0
+    v76 = iconst.i32 32
+    v77 = iadd v75, v76  ; v76 = 32
+    v78 = load.i32 notrap v77
+    v79 = stack_addr.i32 ss0
+    v80 = iconst.i32 36
+    v81 = iadd v79, v80  ; v80 = 36
+    v82 = load.i32 notrap v81
+    v83 = stack_addr.i32 ss0
+    v84 = iconst.i32 40
+    v85 = iadd v83, v84  ; v84 = 40
+    v86 = load.i32 notrap v85
+    v87 = stack_addr.i32 ss0
+    v88 = iconst.i32 44
+    v89 = iadd v87, v88  ; v88 = 44
+    v90 = load.i32 notrap v89
+    v91 = stack_addr.i32 ss0
+    v92 = iconst.i32 48
+    v93 = iadd v91, v92  ; v92 = 48
+    v94 = load.i32 notrap v93
+    v95 = stack_addr.i32 ss0
+    v96 = iconst.i32 52
+    v97 = iadd v95, v96  ; v96 = 52
+    v98 = load.i32 notrap v97
+    v99 = stack_addr.i32 ss0
+    v100 = iconst.i32 56
+    v101 = iadd v99, v100  ; v100 = 56
+    v102 = load.i32 notrap v101
+    v103 = stack_addr.i32 ss0
+    v104 = iconst.i32 60
+    v105 = iadd v103, v104  ; v104 = 60
+    v106 = load.i32 notrap v105
+    v107 = stack_addr.i32 ss0
+    v108 = iconst.i32 64
+    v109 = iadd v107, v108  ; v108 = 64
+    v110 = load.i32 notrap v109
+    v111 = stack_addr.i32 ss0
+    v112 = iconst.i32 68
+    v113 = iadd v111, v112  ; v112 = 68
+    v114 = load.i32 notrap v113
+    v115 = stack_addr.i32 ss0
+    v116 = iconst.i32 72
+    v117 = iadd v115, v116  ; v116 = 72
+    v118 = load.i32 notrap v117
+    v119 = stack_addr.i32 ss0
+    v120 = iconst.i32 76
+    v121 = iadd v119, v120  ; v120 = 76
+    v122 = load.i32 notrap v121
+    v123 = iconst.i32 19
+    v124 = iconst.i32 0
+    jump block7(v123, v124)  ; v123 = 19, v124 = 0
+
+block7(v8: i32, v9: i32):
+    v125 = isub v8, v9
+    v126 = iconst.i32 2
+    v127 = sdiv v125, v126  ; v126 = 2
+    v128 = iadd v127, v9
+    v129 = stack_addr.i32 ss0
+    v130 = iconst.i32 2
+    v131 = ishl v128, v130  ; v130 = 2
+    v132 = iadd v129, v131
+    v133 = load.i32 notrap v132
+    v134 = iconst.i32 1000
+    v135 = icmp eq v133, v134  ; v134 = 1000
+    brif v135, block9(v128), block8
+
+block8:
+    v136 = iconst.i32 1000
+    v137 = icmp.i32 slt v133, v136  ; v136 = 1000
+    v138 = iconst.i32 1
+    v139 = iadd.i32 v128, v138  ; v138 = 1
+    v140 = iconst.i32 -1
+    v141 = iadd.i32 v128, v140  ; v140 = -1
+    v142 = select v137, v139, v9
+    v143 = select.i32 v137, v8, v141
+    v144 = icmp sgt v142, v143
+    v145 = iconst.i32 -1
+    brif v144, block9(v145), block7(v143, v142)  ; v145 = -1
+
+block9(v10: i32):
+    v146 = icmp.i32 sle v46, v50
+    v147 = uextend.i32 v146
+    v148 = icmp.i32 sle v50, v54
+    v149 = uextend.i32 v148
+    v150 = iadd v147, v149
+    v151 = icmp.i32 sle v54, v58
+    v152 = uextend.i32 v151
+    v153 = iadd v150, v152
+    v154 = icmp.i32 sle v58, v62
+    v155 = uextend.i32 v154
+    v156 = iadd v153, v155
+    v157 = icmp.i32 sle v62, v66
+    v158 = uextend.i32 v157
+    v159 = iadd v156, v158
+    v160 = icmp.i32 sle v66, v70
+    v161 = uextend.i32 v160
+    v162 = iadd v159, v161
+    v163 = icmp.i32 sle v70, v74
+    v164 = uextend.i32 v163
+    v165 = iadd v162, v164
+    v166 = icmp.i32 sle v74, v78
+    v167 = uextend.i32 v166
+    v168 = iadd v165, v167
+    v169 = icmp.i32 sle v78, v82
+    v170 = uextend.i32 v169
+    v171 = iadd v168, v170
+    v172 = icmp.i32 sle v82, v86
+    v173 = uextend.i32 v172
+    v174 = iadd v171, v173
+    v175 = icmp.i32 sle v86, v90
+    v176 = uextend.i32 v175
+    v177 = iadd v174, v176
+    v178 = icmp.i32 sle v90, v94
+    v179 = uextend.i32 v178
+    v180 = iadd v177, v179
+    v181 = icmp.i32 sle v94, v98
+    v182 = uextend.i32 v181
+    v183 = iadd v180, v182
+    v184 = icmp.i32 sle v98, v102
+    v185 = uextend.i32 v184
+    v186 = iadd v183, v185
+    v187 = icmp.i32 sle v102, v106
+    v188 = uextend.i32 v187
+    v189 = iadd v186, v188
+    v190 = icmp.i32 sle v106, v110
+    v191 = uextend.i32 v190
+    v192 = iadd v189, v191
+    v193 = icmp.i32 sle v110, v114
+    v194 = uextend.i32 v193
+    v195 = iadd v192, v194
+    v196 = icmp.i32 sle v114, v118
+    v197 = uextend.i32 v196
+    v198 = iadd v195, v197
+    v199 = icmp.i32 sle v118, v122
+    v200 = uextend.i32 v199
+    v201 = iadd v198, v200
+    v202 = iconst.i32 -1
+    v203 = icmp eq v10, v202  ; v202 = -1
+    v204 = uextend.i32 v203
+    v205 = iadd v201, v204
+    v206 = iconst.i32 1000
+    v207 = imul v205, v206  ; v206 = 1000
+    v208 = stack_addr.i32 ss0
+    v209 = iconst.i32 76
+    v210 = iadd v208, v209  ; v209 = 76
+    v211 = load.i32 notrap v210
+    v212 = iadd v211, v46
+    v213 = iadd v212, v207
+    return v213
+}
+

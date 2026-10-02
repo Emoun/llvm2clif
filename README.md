@@ -240,17 +240,14 @@ below 64 KiB and deep recursion or large local arrays overflow the stack.
 Problems found in the Scry Cranelift backend and in `scryer` are described,
 with minimal reproducers, in
 [docs/backend-issues/README.md](docs/backend-issues/README.md), together
-with their status for the backend revision this tool builds against. The
-issues that used to break most programs (`echo.l` routing, a type-tag panic
-on block parameters, and an infinite loop on long reference distances) are
-fixed in that revision, and 17 of the 20 test programs run on the
-simulator. Still open there: code generation is not deterministic, the
-results of `smax`/`smin` and `iabs` keep an unsigned tag (which breaks
-sorting code and `abs(INT_MIN)`), and a `(signed char)x` conversion of an
-`int` followed by a signed use panics the backend in most compiles. The
-affected tests are marked as known failures. `llvm2clif` keeps one
-workaround: explicit zero bytes instead of `.bss`, which the simulator does
-not zero-fill.
+with their status for the backend revision this tool builds against. Most
+of them are fixed in that revision, and 19 of the 20 test programs run on
+the simulator. Still open there: code generation is not deterministic (the
+same input compiles to different objects), and in some of those compiles
+the re-tagging casts for `smax`/`smin` results come out wrong, which breaks
+sorting code (`sort.c`, listed as a known failure) in about 40 % of its
+compiles. `llvm2clif` keeps one workaround: explicit zero bytes instead of
+`.bss`, which the simulator does not zero-fill.
 
 ## Tests
 

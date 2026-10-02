@@ -2,8 +2,8 @@
 // `int` parameter (unsigned ABI tag) truncated to `signed char`/`short` and
 // passed to a function taking `signext` parameters, or sign-extended again
 // (`trunc` followed by `sext` or a signed compare). The Scry backend's type
-// analysis panics on this pattern in most compiles (see
-// docs/backend-issues/README.md, issue 6).
+// analysis used to panic on this pattern in most compiles
+// (docs/backend-issues/README.md, issue 7, fixed).
 // CASES: 1 2 3 4 => 39
 // CASES: -1 -2 -3 -4 => 2009
 // CASES: 100 -100 7 65535 => 2984

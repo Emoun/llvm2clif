@@ -17,10 +17,10 @@ The translator's own correctness is checked independently of the backend by
 running the translated CLIF in Cranelift's interpreter (`cargo test --test
 interp`), which passes for every program that the interpreter can run.
 
-Status with the backend revision llvm2clif builds against (`21187c1`; the
-issues were found on `cfd59dc`, `faad34b` and `21187c1`):
+Status with the backend revision llvm2clif builds against (`504ebe1`; the
+issues were found on `cfd59dc`, `faad34b`, `21187c1` and `504ebe1`):
 
-| issue | status at `21187c1` |
+| issue | status at `504ebe1` |
 |-------|---------------------|
 | 1. `echo.l` forwards every queued operand | fixed in `faad34b` |
 | 2. type-tag conflicts on block parameters | fixed in `faad34b` |
@@ -28,9 +28,9 @@ issues were found on `cfd59dc`, `faad34b` and `21187c1`):
 | 4. no 64-bit values | unchanged, lowered by the translator |
 | 5. infinite loop on a reference distance over 1023 | fixed in `21187c1` |
 | 6. nondeterministic code generation | open |
-| 7. type-analysis panic on `ireduce` followed by a signed use | open (in most compiles) |
-| 8. unsigned result tag of `smax`/`smin` | open (breaks `sort.c`, in some compiles) |
-| 9. unsigned result tag of `iabs` | open (breaks `absminmax.c`) |
+| 7. type-analysis panic on `ireduce` followed by a signed use | fixed in `504ebe1` |
+| 8. re-tagging of `smax`/`smin` results | partially fixed in `504ebe1`: wrong code or operand routing errors in some compiles (breaks `sort.c`) |
+| 9. unsigned result tag of `iabs` | fixed in `504ebe1` |
 | compile time cubic in the block size | open |
 
 ## 1. `echo.l` forwards every queued operand (wrong results)
@@ -185,9 +185,15 @@ would make the output reproducible.
 
 ## 7. Type-analysis panic on `ireduce` followed by a signed use
 
+**Fixed in `504ebe1`** ("fixed issue where type conflicts on picks weren't
+being resolved"; the `Reduce` arm no longer panics and treats the input's
+signedness as unconstrained): the reproducer compiles in 10 of 10 runs and
+returns the right value, and `tests/programs/subword.c` passes in every
+compile. The description below is kept for reference.
+
 **Reproducer:** `reduce_sext.clif`, two instructions: `ireduce.i8` of a
 `uext` parameter, then `sextend.i32` of the result. Compiled ten times it
-panics in most of them (issue 6 decides which):
+panicked in most of them (issue 6 decides which):
 
 ```
 panicked at cranelift/codegen/src/isa/scry/mod.rs:2586
@@ -206,10 +212,33 @@ runs.
 
 ## 8. The result of `smax`/`smin` keeps the unsigned tag of its operands
 
-**Reproducers:** `minmax_chain.clif` (three instructions; deterministic),
-`sort4_minmax.clif` (clang's output for a bubble sort of the four
-arguments; deterministic) and `bubble6.clif` (a six-element bubble sort;
-wrong in about half of the compiles, see issue 6).
+**Partially fixed in `504ebe1`** ("fixed issue where type conflicts on
+picks weren't being resolved": the `Pick` arm of the type analysis now
+pushes a hard demand on the result once both values are known with one
+signedness). `minmax_chain.clif` and `bubble6.clif` are correct in 12 of 12
+compiles. `sort4_minmax.clif` is still wrong in about 5 of 12 compiles
+(-487 instead of -4987 for (13, -5, 0, 0)); its 20 vcode emissions fall
+into 9 variants with 13 to 19 re-tagging casts, and a good and a bad
+object differ only in echo distances and in which copy of a duplicated
+value feeds which consumer. In 4 of the 12 compiles the value is right but
+returned with an `i32` tag instead of the signature's `u32`.
+
+The same compiles also produce operand routing errors: `onepass_bsearch.clif`
+(a single compare-and-swap pass over 20 elements, a sortedness check and a
+binary search; 216 instructions, 10 blocks) fails in about a quarter of its
+compiles with "Alu2 instruction missing first operand", the Pick
+instruction's `ready_peek.next().is_some()` assertion or "found Nan or Nar"
+on the simulator, or returns wrong values; `tests/programs/sort.c` fails
+the same way in about 40 % of its compiles. A failing object has one more
+cast and one more `echo.l` than a passing one, and the instruction that
+misses its operand is an `Alu2` directly after an `Echo`, so the casts
+inserted for pick results appear to be placed without the operand routing
+being redone for them. The original description follows.
+
+**Reproducers:** `minmax_chain.clif` (three instructions; was
+deterministic), `sort4_minmax.clif` (clang's output for a bubble sort of
+the four arguments; was deterministic) and `bubble6.clif` (a six-element
+bubble sort; was wrong in about half of the compiles, see issue 6).
 
 ```sh
 llvm2clif docs/backend-issues/minmax_chain.clif -o m.o
@@ -231,6 +260,10 @@ compare-and-swap into `smin`/`smax` chains, so this breaks sorting code:
 `tests/programs/sort.c`.
 
 ## 9. The result of `iabs` keeps the unsigned tag on its negation path
+
+**Fixed in `504ebe1`** (the `Pick` arm now re-tags the result): the
+reproducer returns 0xC0000000 and `tests/programs/absminmax.c` passes in
+every compile. The description below is kept for reference.
 
 **Reproducer:** `iabs_min.clif`: `iabs` of a `uext` parameter followed by
 `sshr` by 1, with the input INT_MIN. Expected 0xC0000000 (-1073741824:

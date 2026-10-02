@@ -1,7 +1,7 @@
 // abs, smin and smax (clang turns the ternaries into the llvm.abs/smin/smax
-// intrinsics, which llvm2clif translates to iabs/smin/smax). The Scry backend
-// gets the INT_MIN case wrong, and the isolated function does not run at all
-// on the simulator (see docs/backend-issues/README.md, issue 9).
+// intrinsics, which llvm2clif translates to iabs/smin/smax). The INT_MIN case
+// used to come out wrong on the Scry backend (docs/backend-issues/README.md,
+// issue 9, fixed).
 // CASES: 1 2 3 4 => 50
 // CASES: -1 -2 -3 -4 => 50
 // CASES: 100 -100 7 65535 => 3207

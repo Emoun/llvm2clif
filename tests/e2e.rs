@@ -22,17 +22,10 @@ use std::process::Command;
 /// Scry backend/simulator (all of them pass in the Cranelift interpreter, see
 /// `tests/interp.rs`). Each entry names the issue in
 /// `docs/backend-issues/README.md`.
-const KNOWN_BACKEND_FAILURES: &[(&str, &str)] = &[
-    (
-        "sort",
-        "8 (smin/smax result tag; wrong in some compiles, see 6)",
-    ),
-    ("absminmax", "9 (iabs result tag on INT_MIN)"),
-    (
-        "subword",
-        "7 (type-analysis panic on ireduce, in most compiles)",
-    ),
-];
+const KNOWN_BACKEND_FAILURES: &[(&str, &str)] = &[(
+    "sort",
+    "8 (smin/smax re-tagging casts; wrong code or routing errors in some compiles)",
+)];
 
 struct Tools {
     scryer: PathBuf,
