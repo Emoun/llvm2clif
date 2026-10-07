@@ -1,3 +1,4 @@
+; Fixed in rust-wasmtime a5daf64; kept as a regression check.
 ; Issue 8 (see README.md in this directory) in its nondeterministic form: a
 ; bubble sort of six pseudo-random elements (tests/programs/sort.c reduced).
 ; Compile it several times; about half of the objects compute

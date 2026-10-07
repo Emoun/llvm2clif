@@ -23,8 +23,8 @@ use std::process::Command;
 /// `tests/interp.rs`). Each entry names the issue in
 /// `docs/backend-issues/README.md`.
 const KNOWN_BACKEND_FAILURES: &[(&str, &str)] = &[(
-    "sort",
-    "8 (smin/smax re-tagging casts; wrong code or routing errors in some compiles)",
+    "rettag",
+    "10 (return value not re-tagged to the signature, in some compiles)",
 )];
 
 struct Tools {

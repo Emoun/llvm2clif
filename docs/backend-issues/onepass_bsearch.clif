@@ -1,3 +1,4 @@
+; Fixed in rust-wasmtime a5daf64; kept as a regression check.
 ; Reproducer for operand routing errors in some compiles (see README.md in
 ; this directory, issue 8). Translation of
 ;

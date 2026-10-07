@@ -1,3 +1,4 @@
+; Fixed in rust-wasmtime 504ebe1; kept as a regression check.
 ; Reproducer for the unsigned result of `iabs` on its negation path (see
 ; README.md in this directory, issue 9): iabs(INT_MIN) must wrap to INT_MIN
 ; (0x80000000 with a signed tag), so the arithmetic shift yields

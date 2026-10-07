@@ -1,3 +1,5 @@
+; Fixed in rust-wasmtime a5daf64 (the value; see sort4_caller.clif for its tag);
+; kept as a regression check.
 ; Reproducer for issue 8 (see README.md in this directory) in the form clang
 ; produces: a bubble sort of the four arguments, which `opt` turns into
 ; smin/smax/select chains. Translation of

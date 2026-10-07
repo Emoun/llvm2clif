@@ -17,10 +17,11 @@ The translator's own correctness is checked independently of the backend by
 running the translated CLIF in Cranelift's interpreter (`cargo test --test
 interp`), which passes for every program that the interpreter can run.
 
-Status with the backend revision llvm2clif builds against (`504ebe1`; the
-issues were found on `cfd59dc`, `faad34b`, `21187c1` and `504ebe1`):
+Status with the backend revision llvm2clif builds against (`a5daf64`; the
+issues were found on `cfd59dc`, `faad34b`, `21187c1`, `504ebe1` and
+`a5daf64`):
 
-| issue | status at `504ebe1` |
+| issue | status at `a5daf64` |
 |-------|---------------------|
 | 1. `echo.l` forwards every queued operand | fixed in `faad34b` |
 | 2. type-tag conflicts on block parameters | fixed in `faad34b` |
@@ -29,8 +30,9 @@ issues were found on `cfd59dc`, `faad34b`, `21187c1` and `504ebe1`):
 | 5. infinite loop on a reference distance over 1023 | fixed in `21187c1` |
 | 6. nondeterministic code generation | open |
 | 7. type-analysis panic on `ireduce` followed by a signed use | fixed in `504ebe1` |
-| 8. re-tagging of `smax`/`smin` results | partially fixed in `504ebe1`: wrong code or operand routing errors in some compiles (breaks `sort.c`) |
+| 8. re-tagging of `smax`/`smin` results | fixed in `a5daf64` |
 | 9. unsigned result tag of `iabs` | fixed in `504ebe1` |
+| 10. return values not re-tagged to the signature | open (breaks `rettag.c` in some compiles) |
 | compile time cubic in the block size | open |
 
 ## 1. `echo.l` forwards every queued operand (wrong results)
@@ -212,6 +214,14 @@ runs.
 
 ## 8. The result of `smax`/`smin` keeps the unsigned tag of its operands
 
+**Fixed in `a5daf64`** (commit `cd0f4af`, "further fixes to reference
+generation", which also adds a final check of the reference distances, and
+stronger re-tagging rules for `pick` results): `minmax_chain.clif`,
+`sort4_minmax.clif`, `bubble6.clif` and `onepass_bsearch.clif` return the
+right values in 12 of 12 compiles each, and `tests/programs/sort.c` passes
+in 8 of 8. What remains is the tag of the returned value, issue 10. The
+history of the issue follows.
+
 **Partially fixed in `504ebe1`** ("fixed issue where type conflicts on
 picks weren't being resolved": the `Pick` arm of the type analysis now
 pushes a hard demand on the result once both values are known with one
@@ -277,3 +287,33 @@ unsigned-tagged; the type analysis records it as signed. Only INT_MIN is
 observable (any other magnitude fits in 31 bits), which is how
 `tests/programs/absminmax.c` fails: `clamp(INT_MIN)` returns 1000 instead
 of 10. With a `sext` parameter the same function is correct.
+
+## 10. Return values are not re-tagged to the signature's extension
+
+**Reproducers:** `sort4_caller.clif` (a caller of `sort4_minmax.clif`'s
+function that shifts the result logically) and `tests/programs/rettag.c`
+(the same in C: the caller treats the `int` result of a non-inlined
+bubble sort as `unsigned`).
+
+```sh
+for i in 1 2 3 4 5 6; do
+  llvm2clif docs/backend-issues/sort4_caller.clif -o $i.o
+  wild -m elf32scry -e caller -z noexecstack -o $i.elf $i.o
+  scryer $i.elf --target=scry32-unknown-none-elf -i=13u32 -i=4294967291u32 -i=0u32 -i=0u32
+done
+# expected 2147481154u32 ((0xFFFFEC85 >> 1) + (0xFFFFEC85 <u 5));
+# about half of the compiles print 4294964802u32 (the arithmetic shift)
+```
+
+`sort4` is declared `-> i32 uext`, so its caller's type analysis takes the
+call's result as unsigned and emits no re-tagging cast before the logical
+shift. The callee, however, emits no cast before its return either: the
+result arrives with whatever tag the final `iadd`'s operands carry, and
+with issue 6 deciding where the casts of the `smin`/`smax` chains land,
+that tag is `i32` in about half of the compiles (run `sort4` alone and the
+simulator prints `-4987i32` or `4294962309u32`). The caller then executes
+the shift as arithmetic. Arguments are not affected: a signed-tagged value
+passed to a `uext` parameter is re-tagged at the call in 12 of 12 compiles
+(tested with `smin`/`smax` results in both argument orders). The same
+re-tagging at the return would close this. `rettag.c` fails in about 3 of
+12 compiles, only for the cases whose sorted value is negative.

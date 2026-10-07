@@ -1,0 +1,57 @@
+; Reproducer for a return value that does not carry the tag its signature
+; declares (see README.md in this directory, issue 10). `sort4` is
+; `sort4_minmax.clif` (clang's bubble sort of four arguments as smin/smax
+; chains); it is declared to return `i32 uext`, but in about half of the
+; compiles (the backend is not deterministic, issue 6) its result reaches
+; the caller with an `i32` tag, and the caller's logical shift of it is then
+; executed as an arithmetic shift:
+;
+;   caller(13, -5, 0, 0): sort4 == -4987 (0xFFFFEC85);
+;   expected (0xFFFFEC85 >> 1) + (0xFFFFEC85 <u 5) == 2147481154,
+;   observed 4294964802 (0xFFFFF642, the arithmetic shift) in 6 of 12 compiles.
+;
+; Run `sort4` on its own with the same inputs and the simulator prints the
+; returned operand as `-4987i32` in those compiles and `4294962309u32` in
+; the others. The function body never emits a re-tagging cast before its
+; return; the result's tag is whatever the final `iadd`'s operands carry.
+function %sort4(i32 uext, i32 uext, i32 uext, i32 uext) -> i32 uext system_v {
+block0(v0: i32, v1: i32, v2: i32, v3: i32):
+    v4 = smax v0, v1
+    v5 = smin v0, v1
+    v6 = smax v4, v2
+    v7 = smin v4, v2
+    v8 = smax v6, v3
+    v9 = smin v6, v3
+    v10 = icmp sgt v5, v2
+    v11 = select v10, v5, v7
+    v12 = select v10, v7, v5
+    v13 = smax v11, v9
+    v14 = smin v11, v9
+    v15 = smax v12, v14
+    v16 = smin v12, v14
+    v17 = iconst.i32 1000
+    v18 = imul v16, v17  ; v17 = 1000
+    v19 = iconst.i32 100
+    v20 = imul v15, v19  ; v19 = 100
+    v21 = iadd v20, v18
+    v22 = iconst.i32 10
+    v23 = imul v13, v22  ; v22 = 10
+    v24 = iadd v21, v23
+    v25 = iadd v24, v8
+    return v25
+}
+
+
+function %caller(i32 uext, i32 uext, i32 uext, i32 uext) -> i32 uext system_v {
+    sig0 = (i32 uext, i32 uext, i32 uext, i32 uext) -> i32 uext system_v
+    fn0 = %sort4 sig0
+block0(v0: i32, v1: i32, v2: i32, v3: i32):
+    v4 = call fn0(v0, v1, v2, v3)
+    v5 = iconst.i32 1
+    v6 = ushr v4, v5
+    v7 = iconst.i32 5
+    v8 = icmp ult v4, v7
+    v9 = uextend.i32 v8
+    v10 = iadd v6, v9
+    return v10
+}

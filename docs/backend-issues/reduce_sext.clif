@@ -1,3 +1,4 @@
+; Fixed in rust-wasmtime 504ebe1; kept as a regression check.
 ; Reproducer for the type-analysis panic on `ireduce` followed by a signed
 ; use (see README.md in this directory, issue 7). The backend is not
 ; deterministic (issue 6), so compile it several times:

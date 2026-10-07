@@ -241,13 +241,14 @@ Problems found in the Scry Cranelift backend and in `scryer` are described,
 with minimal reproducers, in
 [docs/backend-issues/README.md](docs/backend-issues/README.md), together
 with their status for the backend revision this tool builds against. Most
-of them are fixed in that revision, and 19 of the 20 test programs run on
+of them are fixed in that revision, and 20 of the 21 test programs run on
 the simulator. Still open there: code generation is not deterministic (the
-same input compiles to different objects), and in some of those compiles
-the re-tagging casts for `smax`/`smin` results come out wrong, which breaks
-sorting code (`sort.c`, listed as a known failure) in about 40 % of its
-compiles. `llvm2clif` keeps one workaround: explicit zero bytes instead of
-`.bss`, which the simulator does not zero-fill.
+same input compiles to different objects), and a function's return value
+does not always carry the tag its signature declares, so a caller that
+uses an `int` result as `unsigned` can get a wrong answer in some compiles
+(`rettag.c`, listed as a known failure). `llvm2clif` keeps one workaround:
+explicit zero bytes instead of `.bss`, which the simulator does not
+zero-fill.
 
 ## Tests
 

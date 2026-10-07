@@ -1,3 +1,4 @@
+; Fixed in rust-wasmtime a5daf64; kept as a regression check.
 ; Reproducer for the wrong result tag of `smax`/`smin` (see README.md in
 ; this directory, issue 8). The result of the first `smax` is consumed by a
 ; second signed min/max without a re-tagging cast, and the machine then
