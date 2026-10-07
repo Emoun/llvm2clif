@@ -7,8 +7,6 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  # The Scry cranelift fork needs a recent stable toolchain.
-  RUST_TOOLCHAIN: stable
 
 jobs:
   # Build llvm2clif and run the tests that need no external tools (parser,
@@ -35,7 +33,11 @@ jobs:
       - name: Unit and interpreter tests
         run: cargo test --release
 
-  # The full pipeline: clang/opt -> llvm2clif -> wild -> scryer.
+  # The full pipeline: clang/opt -> llvm2clif -> wild -> scryer. LLVM comes
+  # from each platform's own package source (the prebuilt release tarballs
+  # need libraries that ubuntu-latest no longer has, and the Windows
+  # installer does not ship `opt`); the tools are handed to the tests through
+  # the SCRY_* variables that scry-cc and the test harness read.
   end-to-end:
     name: End-to-end on scryer (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -47,15 +49,40 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Install LLVM (clang and opt)
-        uses: KyleMayes/install-llvm-action@v2
-        with:
-          version: "18"
+      - name: Install LLVM (Ubuntu)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-18 llvm-18
+          echo "SCRY_CLANG=clang-18" >> "$GITHUB_ENV"
+          echo "SCRY_OPT=opt-18" >> "$GITHUB_ENV"
+      - name: Install LLVM (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install llvm@18
+          prefix="$(brew --prefix llvm@18)"
+          echo "SCRY_CLANG=$prefix/bin/clang" >> "$GITHUB_ENV"
+          echo "SCRY_OPT=$prefix/bin/opt" >> "$GITHUB_ENV"
+      - name: Install LLVM (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          curl -sSL -o llvm.tar.xz https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.8/clang+llvm-18.1.8-x86_64-pc-windows-msvc.tar.xz
+          mkdir -p "$RUNNER_TEMP/llvm" && tar -xf llvm.tar.xz -C "$RUNNER_TEMP/llvm" --strip-components=1
+          echo "SCRY_CLANG=$RUNNER_TEMP/llvm/bin/clang.exe" >> "$GITHUB_ENV"
+          echo "SCRY_OPT=$RUNNER_TEMP/llvm/bin/opt.exe" >> "$GITHUB_ENV"
       - name: Install the Scry simulator and linker
         shell: bash
         run: |
           cargo install --locked --git https://github.com/Scry-arch/scryer.git --rev 6fc6ac9d8fa452d306049692bd8ac1ab02c2e69e scryer
           cargo install --locked --git https://github.com/Scry-arch/scry-wild.git --rev 2b9f2b4d754428f3a8c0f5b76ff762fd9615a7ad --bin wild wild-linker
+      - name: Check the tools
+        shell: bash
+        run: |
+          set +e
+          for t in "$SCRY_CLANG --version" "$SCRY_OPT --version" "wild --version" "scryer --help"; do
+            echo "== $t"; $t 2>&1 | head -3; echo "exit status: ${PIPESTATUS[0]}"
+          done
       - name: Build
         run: cargo build --release
       - name: End-to-end tests
