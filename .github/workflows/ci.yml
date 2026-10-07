@@ -66,11 +66,14 @@ jobs:
       - name: Install LLVM (Windows)
         if: runner.os == 'Windows'
         shell: bash
+        # The release tarball (unlike the installer) ships opt. Extract into
+        # the workspace (bash's tar does not take Windows-style paths) and
+        # pass native paths on to the tools.
         run: |
           curl -sSL -o llvm.tar.xz https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.8/clang+llvm-18.1.8-x86_64-pc-windows-msvc.tar.xz
-          mkdir -p "$RUNNER_TEMP/llvm" && tar -xf llvm.tar.xz -C "$RUNNER_TEMP/llvm" --strip-components=1
-          echo "SCRY_CLANG=$RUNNER_TEMP/llvm/bin/clang.exe" >> "$GITHUB_ENV"
-          echo "SCRY_OPT=$RUNNER_TEMP/llvm/bin/opt.exe" >> "$GITHUB_ENV"
+          mkdir -p llvm-win && tar -xf llvm.tar.xz -C llvm-win --strip-components=1 && rm llvm.tar.xz
+          echo "SCRY_CLANG=$(cygpath -w "$PWD/llvm-win/bin/clang.exe")" >> "$GITHUB_ENV"
+          echo "SCRY_OPT=$(cygpath -w "$PWD/llvm-win/bin/opt.exe")" >> "$GITHUB_ENV"
       - name: Install the Scry simulator and linker
         shell: bash
         run: |

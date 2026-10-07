@@ -43,6 +43,12 @@ fn runs(path: &Path, arg: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Whether the program at `path` can be started at all (whatever it makes
+/// of `arg`): `wild` accepts `--version` on Linux but rejects it on macOS.
+fn starts(path: &Path, arg: &str) -> bool {
+    Command::new(path).arg(arg).output().is_ok()
+}
+
 /// Locates the toolchain, or returns `None` (after printing why) when it is
 /// unavailable and not required.
 fn tools() -> Option<Tools> {
@@ -51,14 +57,20 @@ fn tools() -> Option<Tools> {
     let wild = tool("SCRY_WILD", "wild");
     let scryer = tool("SCRY_SCRYER", "scryer");
     let missing: Vec<String> = [
-        (&clang, "--version"),
-        (&opt, "--version"),
-        (&wild, "--version"),
-        (&scryer, "--help"),
+        (&clang, "--version", true),
+        (&opt, "--version", true),
+        (&wild, "--version", false),
+        (&scryer, "--help", true),
     ]
     .iter()
-    .filter(|(p, a)| !runs(p, a))
-    .map(|(p, _)| p.display().to_string())
+    .filter(|(p, a, must_succeed)| {
+        if *must_succeed {
+            !runs(p, a)
+        } else {
+            !starts(p, a)
+        }
+    })
+    .map(|(p, _, _)| p.display().to_string())
     .collect();
     if missing.is_empty() {
         return Some(Tools { scryer });
