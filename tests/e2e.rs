@@ -22,10 +22,7 @@ use std::process::Command;
 /// Scry backend/simulator (all of them pass in the Cranelift interpreter, see
 /// `tests/interp.rs`). Each entry names the issue in
 /// `docs/backend-issues/README.md`.
-const KNOWN_BACKEND_FAILURES: &[(&str, &str)] = &[(
-    "rettag",
-    "10 (return value not re-tagged to the signature, in some compiles)",
-)];
+const KNOWN_BACKEND_FAILURES: &[(&str, &str)] = &[];
 
 struct Tools {
     scryer: PathBuf,

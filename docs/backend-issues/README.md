@@ -17,11 +17,11 @@ The translator's own correctness is checked independently of the backend by
 running the translated CLIF in Cranelift's interpreter (`cargo test --test
 interp`), which passes for every program that the interpreter can run.
 
-Status with the backend revision llvm2clif builds against (`a5daf64`; the
+Status with the backend revision llvm2clif builds against (`fad5e62`; the
 issues were found on `cfd59dc`, `faad34b`, `21187c1`, `504ebe1` and
 `a5daf64`):
 
-| issue | status at `a5daf64` |
+| issue | status at `fad5e62` |
 |-------|---------------------|
 | 1. `echo.l` forwards every queued operand | fixed in `faad34b` |
 | 2. type-tag conflicts on block parameters | fixed in `faad34b` |
@@ -32,7 +32,7 @@ issues were found on `cfd59dc`, `faad34b`, `21187c1`, `504ebe1` and
 | 7. type-analysis panic on `ireduce` followed by a signed use | fixed in `504ebe1` |
 | 8. re-tagging of `smax`/`smin` results | fixed in `a5daf64` |
 | 9. unsigned result tag of `iabs` | fixed in `504ebe1` |
-| 10. return values not re-tagged to the signature | open (breaks `rettag.c` in some compiles) |
+| 10. return values not re-tagged to the signature | fixed in `fad5e62` |
 | compile time cubic in the block size | open |
 
 ## 1. `echo.l` forwards every queued operand (wrong results)
@@ -289,6 +289,12 @@ observable (any other magnitude fits in 31 bits), which is how
 of 10. With a `sext` parameter the same function is correct.
 
 ## 10. Return values are not re-tagged to the signature's extension
+
+**Fixed in `fad5e62`** ("picks getting different signedness now output
+unsigned unless downstream consumers specify otherwise"): `sort4_caller.clif`
+returns 2147481154 and its callee's result arrives tagged `u32` in 12 of 12
+compiles, and `tests/programs/rettag.c` passes in 12 of 12. The description
+below is kept for reference.
 
 **Reproducers:** `sort4_caller.clif` (a caller of `sort4_minmax.clif`'s
 function that shifts the result logically) and `tests/programs/rettag.c`

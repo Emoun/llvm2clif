@@ -1,3 +1,4 @@
+; Fixed in rust-wasmtime fad5e62; kept as a regression check.
 ; Reproducer for a return value that does not carry the tag its signature
 ; declares (see README.md in this directory, issue 10). `sort4` is
 ; `sort4_minmax.clif` (clang's bubble sort of four arguments as smin/smax

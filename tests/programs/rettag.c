@@ -1,9 +1,9 @@
 // A function result computed through smin/smax chains (clang's output for a
 // bubble sort of the four arguments), used as an unsigned value by the caller.
-// The callee returns `int`, which the ABI tags unsigned, but the Scry backend
-// does not always re-tag the result on return (docs/backend-issues/README.md,
-// issue 10), so the caller's logical shift and unsigned compare can run
-// signed. Cases with a negative sorted value expose it.
+// The callee returns `int`, which the ABI tags unsigned; the Scry backend used
+// to leave the result tagged signed in some compiles, so that the caller's
+// logical shift and unsigned compare ran signed (docs/backend-issues/README.md,
+// issue 10, fixed). Cases with a negative sorted value expose it.
 // CASES: 1 2 3 4 => 1182
 // CASES: 13 -5 0 0 => -2147421127
 // CASES: -9 20 -9 7 => -2147423749

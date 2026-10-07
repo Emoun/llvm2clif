@@ -240,15 +240,14 @@ below 64 KiB and deep recursion or large local arrays overflow the stack.
 Problems found in the Scry Cranelift backend and in `scryer` are described,
 with minimal reproducers, in
 [docs/backend-issues/README.md](docs/backend-issues/README.md), together
-with their status for the backend revision this tool builds against. Most
-of them are fixed in that revision, and 20 of the 21 test programs run on
-the simulator. Still open there: code generation is not deterministic (the
-same input compiles to different objects), and a function's return value
-does not always carry the tag its signature declares, so a caller that
-uses an `int` result as `unsigned` can get a wrong answer in some compiles
-(`rettag.c`, listed as a known failure). `llvm2clif` keeps one workaround:
-explicit zero bytes instead of `.bss`, which the simulator does not
-zero-fill.
+with their status for the backend revision this tool builds against. All
+the correctness issues are fixed in that revision, and all 21 test
+programs run on the simulator. Still open there: code generation is not
+deterministic (the same input compiles to different objects, which so far
+only matters for reproducibility), and compile time grows cubically with
+the size of a basic block (a thousand-instruction block takes well over a
+minute). `llvm2clif` keeps one workaround: explicit zero bytes instead of
+`.bss`, which the simulator does not zero-fill.
 
 ## Tests
 
