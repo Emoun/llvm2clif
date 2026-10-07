@@ -256,7 +256,12 @@ pub fn run(cfg: &Config) -> anyhow::Result<()> {
         .clone()
         .unwrap_or_else(|| PathBuf::from(format!("{}.elf", stem(&cfg.inputs[0]))));
     let mut cmd = Command::new(&wild);
-    cmd.arg("-m")
+    // wild guesses its command-line flavor from the host (ld64-style on
+    // macOS); the Scry ELF options need the GNU ld flavor, and the flag
+    // forcing it has to come first.
+    cmd.arg("-flavor")
+        .arg("gnu")
+        .arg("-m")
         .arg("elf32scry")
         .arg("-e")
         .arg(&cfg.entry)

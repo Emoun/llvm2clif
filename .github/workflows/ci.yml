@@ -83,7 +83,7 @@ jobs:
         shell: bash
         run: |
           set +e
-          for t in "$SCRY_CLANG --version" "$SCRY_OPT --version" "wild --version" "scryer --help"; do
+          for t in "$SCRY_CLANG --version" "$SCRY_OPT --version" "wild -flavor gnu --version" "scryer --help"; do
             echo "== $t"; $t 2>&1 | head -3; echo "exit status: ${PIPESTATUS[0]}"
           done
       - name: Build

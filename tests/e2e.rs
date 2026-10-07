@@ -35,18 +35,12 @@ fn tool(env: &str, default: &str) -> PathBuf {
     }
 }
 
-fn runs(path: &Path, arg: &str) -> bool {
+fn runs(path: &Path, args: &[&str]) -> bool {
     Command::new(path)
-        .arg(arg)
+        .args(args)
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
-}
-
-/// Whether the program at `path` can be started at all (whatever it makes
-/// of `arg`): `wild` accepts `--version` on Linux but rejects it on macOS.
-fn starts(path: &Path, arg: &str) -> bool {
-    Command::new(path).arg(arg).output().is_ok()
 }
 
 /// Locates the toolchain, or returns `None` (after printing why) when it is
@@ -56,21 +50,17 @@ fn tools() -> Option<Tools> {
     let opt = tool("SCRY_OPT", "opt");
     let wild = tool("SCRY_WILD", "wild");
     let scryer = tool("SCRY_SCRYER", "scryer");
+    // wild only understands `--version` in its GNU flavor, which is not the
+    // default on macOS.
     let missing: Vec<String> = [
-        (&clang, "--version", true),
-        (&opt, "--version", true),
-        (&wild, "--version", false),
-        (&scryer, "--help", true),
+        (&clang, &["--version"][..]),
+        (&opt, &["--version"][..]),
+        (&wild, &["-flavor", "gnu", "--version"][..]),
+        (&scryer, &["--help"][..]),
     ]
     .iter()
-    .filter(|(p, a, must_succeed)| {
-        if *must_succeed {
-            !runs(p, a)
-        } else {
-            !starts(p, a)
-        }
-    })
-    .map(|(p, _, _)| p.display().to_string())
+    .filter(|(p, a)| !runs(p, a))
+    .map(|(p, _)| p.display().to_string())
     .collect();
     if missing.is_empty() {
         return Some(Tools { scryer });

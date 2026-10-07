@@ -179,13 +179,15 @@ opt -O2 -S -o prog.ll prog.pre.ll
 llvm2clif prog.ll -o prog.o                 # Scry object file
 llvm2clif prog.ll --emit clif -o prog.clif  # Cranelift IR, for inspection
 llvm2clif prog.ll --emit asm -o prog.s      # Scry code as the backend disassembles it
-wild -m elf32scry -e main -z noexecstack --gc-sections -o prog.elf prog.o
+wild -flavor gnu -m elf32scry -e main -z noexecstack --gc-sections -o prog.elf prog.o
 scryer prog.elf --target=scry32-unknown-none-elf
 ```
 
 `llvm2clif` prints an error naming the function and source line when it meets
 something it cannot translate; `--skip-unsupported` turns that into a warning
-and drops the function.
+and drops the function. The `-flavor gnu` flag (which must come first) makes
+wild read GNU ld options on every host; on macOS it would otherwise expect
+ld64-style ones.
 
 ## What is supported
 
