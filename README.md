@@ -250,14 +250,15 @@ issues found with the test programs are fixed in that revision, and all 23
 test programs run on the simulator. Open there: three backend crashes found
 with Embench (a function with a `short` parameter, a comparison result
 shifted with `sshr`, and a reference-distance fixed point that does not
-converge), code generation that is not deterministic (the same input
+converge), a compile-time explosion on nested loops (a 30-instruction
+function that does not compile in 15 minutes, which is what stops
+`aha-mont64`), code generation that is not deterministic (the same input
 compiles to different objects, which so far only matters for
 reproducibility), and compile time that grows cubically with the size of a
-basic block (a thousand-instruction block takes well over a minute, and two
-Embench benchmarks over half an hour). The simulator's fixed 4 KiB stack
-and 64 KiB image limit stop two more benchmarks. `llvm2clif` keeps one
-workaround: explicit zero bytes instead of `.bss`, which the simulator does
-not zero-fill.
+basic block (a thousand-instruction block takes well over a minute). The
+simulator's fixed 4 KiB stack and 64 KiB image limit stop two more
+benchmarks. `llvm2clif` keeps one workaround: explicit zero bytes instead
+of `.bss`, which the simulator does not zero-fill.
 
 ## Tests
 

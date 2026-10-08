@@ -1,0 +1,97 @@
+; Issue 14: compile time explodes on nested loops with long-lived values.
+;
+; The backend (rust-wasmtime fad5e62) does not finish compiling this
+; 30-instruction function in 15 minutes (a 1300-instruction straight-line
+; block takes 45 seconds). Cut down from Embench's aha-mont64
+; `benchmark_body` (one basic block of 1006 instructions after inlining, more
+; than 30 minutes) with tools/reduce_clif.py and tools/reduce_clif_blocks.py,
+; using "takes longer than 10 seconds" as the predicate, then rewritten by
+; hand. Everything below is needed; removing any one of these makes it
+; compile in under a second:
+;   * the outer loop (block2 .. block12), the middle loop (block3 .. block10)
+;     and the chain of self-looping blocks (block4 .. block9) inside it;
+;   * the arithmetic of block9 and block11 on the values defined in block1;
+;   * the second pair of zero constants (v16, v17), which are used only by
+;     the outer loop's latch in block12: with v2 and v3 used there instead
+;     (the same values), or with only one of the two duplicated, the function
+;     compiles in half a second. The value of v17 does not matter (1 is as
+;     slow as 0).
+; The function computes nothing useful; it should compile quickly and return
+; its second parameter:
+;   llvm2clif compile_time_nested_loops.clif -o repro.o
+
+function %compile_time_nested_loops(i32 uext, i32 uext) -> i32 uext system_v {
+block0(v0: i32, v1: i32):
+    v2 = iconst.i32 0
+    v3 = iconst.i8 0
+    v16 = iconst.i32 0
+    v17 = iconst.i8 0
+    brif v3, block13(v2), block1
+
+block1:
+    v4 = icmp eq v1, v2
+    v5 = select v3, v2, v2
+    v6 = select v3, v2, v2
+    v7 = select v3, v2, v2
+    v8 = select v3, v2, v2
+    v9 = select v3, v2, v2
+    v10 = select v3, v2, v2
+    v11 = bor v2, v2
+    v12 = bor v2, v2
+    v13 = iadd v2, v2
+    v14 = select v3, v2, v2
+    v15 = select v3, v2, v2
+    jump block2(v2, v2)
+
+block2(v20: i32, v21: i32):
+    brif v4, block12(v20), block3(v2)
+
+block3(v22: i32):
+    jump block4(v2, v13, v2, v2, v11, v12)
+
+block4(v30: i32, v31: i32, v32: i32, v33: i32, v34: i32, v35: i32):
+    brif v3, block4(v2, v2, v2, v2, v2, v2), block5(v2, v2, v2, v2, v2, v2)
+
+block5(v36: i32, v37: i32, v38: i32, v39: i32, v40: i32, v41: i32):
+    brif v3, block5(v2, v2, v2, v2, v2, v2), block6(v2, v2, v2, v2, v2, v2)
+
+block6(v42: i32, v43: i32, v44: i32, v45: i32, v46: i32, v47: i32):
+    brif v3, block6(v2, v2, v2, v2, v2, v2), block7(v9, v10, v2, v2, v2, v2)
+
+block7(v48: i32, v49: i32, v50: i32, v51: i32, v52: i32, v53: i32):
+    brif v3, block7(v2, v2, v2, v2, v2, v2), block8(v7, v8, v2, v2, v2, v2)
+
+block8(v54: i32, v55: i32, v56: i32, v57: i32, v58: i32, v59: i32):
+    brif v3, block8(v2, v2, v2, v2, v2, v2), block9(v2, v2, v2, v2, v2, v2)
+
+block9(v60: i32, v61: i32, v62: i32, v63: i32, v64: i32, v65: i32):
+    v66 = select v3, v5, v2
+    v67 = select v3, v6, v2
+    v68 = isub v2, v66
+    v69 = isub v2, v67
+    v70 = isub v69, v2
+    brif v3, block9(v68, v70, v2, v2, v2, v2), block10
+
+block10:
+    v71 = iadd v22, v2
+    v72 = icmp eq v71, v1
+    brif v72, block11, block3(v71)
+
+block11:
+    v73 = imul v2, v15
+    v74 = iadd v73, v2
+    v75 = iadd v74, v2
+    v76 = imul v2, v14
+    v77 = iadd v76, v75
+    v78 = icmp ne v77, v2
+    v79 = bor v3, v78
+    v80 = select v2, v3, v79
+    v81 = uextend.i32 v80
+    jump block12(v81)
+
+block12(v82: i32):
+    brif v17, block13(v82), block2(v82, v16)
+
+block13(v83: i32):
+    return v83
+}

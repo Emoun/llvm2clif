@@ -36,10 +36,11 @@ issues were found on `cfd59dc`, `faad34b`, `21187c1`, `504ebe1` and
 | 11. type-analysis panic on a function with a sub-word parameter | open |
 | 12. type-analysis panic on a comparison result used through `sshr` | open |
 | 13. reference distance assignment does not converge | open |
+| 14. compile time explodes on nested loops with long-lived values | open |
 | compile time cubic in the block size | open |
 | simulator: 4 KiB stack and 64 KiB image | open (limits) |
 
-Issues 11 to 13 and the simulator limits were found by running
+Issues 11 to 14 and the simulator limits were found by running
 [Embench-IoT](../../benchmarks/embench/README.md) on the toolchain.
 
 ## 1. `echo.l` forwards every queued operand (wrong results)
@@ -472,6 +473,56 @@ run and verify. Neither panic is a clean error message.
 
 The cubic compile time (above) determines which Embench benchmarks are
 practical. `aha-mont64` (`benchmark_body`: one basic block of 1006
-instructions after the 64-bit lowering) and `nettle-sha256`
-(`_nettle_sha256_compress`: a block of 837 instructions) take over 30
-minutes each to compile; the other benchmarks compile in 0.2 to 8.5 seconds.
+instructions after inlining and the 64-bit lowering) and `nettle-sha256`
+(`_nettle_sha256_compress`: a block of 837 instructions, the rounds being
+unrolled by hand in the source) take over 30 minutes each to compile; the
+other benchmarks compile in 0.2 to 8.5 seconds, and `aha-mont64` compiles
+in 0.6 seconds when inlining is disabled.
+
+Block length alone does not explain `aha-mont64`: straight-line 64-bit
+code generated for the purpose (`a = a * b + i` chains, with or without a
+reused operand or a call in every step) compiles in these times,
+
+| instructions in the block | compile time |
+|---------------------------|--------------|
+| 227 | 0.25 s |
+| 451 | 1.8 s |
+| 675 | 5.8 s |
+| 899 | 14 s |
+| 1347 | 45 s |
+
+about cubic, so a 1006-instruction chain would take 20 seconds, not 30
+minutes. `montmul` from the same benchmark (311 instructions in one block)
+compiles in 0.44 seconds. What makes the inlined loop body two orders of
+magnitude slower is issue 14.
+
+## 14. Compile time explodes on nested loops with long-lived values
+
+**Reproducer:** `compile_time_nested_loops.clif` (14 blocks, 30
+instructions; not compiled within 15 minutes).
+
+The function is the skeleton of aha-mont64's `benchmark_body`: an outer
+loop around a middle loop around a chain of six self-looping blocks with
+six parameters each, a few values defined before the loops and consumed
+in the innermost block and after the middle loop, and the outer loop's
+latch (`brif v17, block13(v82), block2(v82, v16)`) testing and passing a
+*second* pair of zero constants defined in the entry block. The
+reduction was automatic (`tools/reduce_clif.py` and
+`tools/reduce_clif_blocks.py` with "compiles for more than 10 seconds" as
+the predicate), followed by ablation of the result:
+
+| change | compile time |
+|--------|--------------|
+| as is | > 900 s |
+| middle loop removed (block10 always goes to block11) | 0.16 s |
+| outer loop removed (block12 always returns) | 0.06 s |
+| self-loops removed (the chain is straight) | 0.04 s |
+| block9's or block11's arithmetic removed | 0.1 s |
+| latch uses v3 and v2 instead of v17 and v16 | 0.15 s |
+| latch uses v3 and v16, or v17 and v2 | 0.3 to 0.5 s |
+| v17 = 1 instead of 0 | > 60 s |
+
+So two extra values that are defined at the entry and live across every
+loop until the outermost latch turn a sub-second compile into one that
+does not finish, while either one alone is harmless. In `benchmark_body`
+the corresponding values are the loop bound and a counter.

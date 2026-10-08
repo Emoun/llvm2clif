@@ -49,8 +49,8 @@ With rust-wasmtime `fad5e62`, scryer `6fc6ac9` and wild `2b9f2b4`:
 | nsichneu | simulator limit | passes with the stack moved up (16.7 M); its 68 KiB image overlaps the stack at 64 KiB |
 | edn | backend bug | [issue 11](../../docs/backend-issues/README.md): sub-word parameter typing panic |
 | picojpeg | backend bug | [issue 13](../../docs/backend-issues/README.md): reference distances do not converge (after [issue 12](../../docs/backend-issues/README.md) was avoided in llvm2clif) |
-| aha-mont64 | compile time | one 1006-instruction block after 64-bit lowering; see below |
-| nettle-sha256 | compile time | one 837-instruction block; see below |
+| aha-mont64 | backend bug | [issue 14](../../docs/backend-issues/README.md): the inlined loop does not compile in 30 minutes; passes with `--cflags=-fno-inline-functions` (67.1 M, compiles in 0.6 s) |
+| nettle-sha256 | compile time | one 837-instruction block (the rounds are unrolled by hand, so no flag helps); see below |
 | wikisort | unsupported | calls `sqrt` on a `double`; no floating point on Scry |
 
 Instruction counts are scryer's `InstructionReads` for one iteration
@@ -66,4 +66,9 @@ stack address.
 **Compile time.** The backend's compile time grows cubically with the size
 of a basic block (see the open issue in `docs/backend-issues`), and the two
 benchmarks with very long straight-line blocks take over 30 minutes each
-to compile; the others compile in under 10 seconds.
+to compile; the others compile in under 10 seconds. `aha-mont64`'s block is
+the benchmark loop with everything inlined, and what makes it slow is not
+its length but the loop nesting (issue 14, with a 30-instruction
+reproducer); built with `--cflags=-fno-inline-functions` (the `=` form,
+because the value starts with a dash) it compiles in under a second and
+passes.
