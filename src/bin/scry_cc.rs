@@ -42,6 +42,23 @@ Any other option starting with `-` (e.g. -I, -D, -std=, -W...) is passed
 through to clang.
 ";
 
+/// Clang options whose value is the following argument (`-I dir`); others
+/// (`-Idir`, `-std=c11`) are single arguments.
+const CLANG_OPTIONS_WITH_VALUE: &[&str] = &[
+    "-I",
+    "-D",
+    "-U",
+    "-include",
+    "-imacros",
+    "-isystem",
+    "-iquote",
+    "-idirafter",
+    "-x",
+    "-Xclang",
+    "-Xpreprocessor",
+    "-mllvm",
+];
+
 fn main() {
     let cfg = match parse_args(std::env::args_os().skip(1).collect()) {
         Ok(Some(cfg)) => cfg,
@@ -122,8 +139,12 @@ fn parse_args(args: Vec<OsString>) -> Result<Option<Config>, String> {
                 } else if let Some(p) = s.strip_prefix("--entry=") {
                     cfg.entry = p.to_string();
                 } else if s.starts_with('-') && s.len() > 1 {
-                    // Pass-through to clang.
+                    // Pass-through to clang, together with the value of an
+                    // option that takes one as a separate argument.
                     cfg.clang_args.push(arg);
+                    if CLANG_OPTIONS_WITH_VALUE.contains(&s.as_str()) {
+                        cfg.clang_args.push(value(&s)?);
+                    }
                 } else {
                     cfg.inputs.push(PathBuf::from(arg));
                 }
@@ -135,4 +156,35 @@ fn parse_args(args: Vec<OsString>) -> Result<Option<Config>, String> {
         return Err("no input files".into());
     }
     Ok(Some(cfg))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(list: &[&str]) -> Config {
+        parse_args(list.iter().map(OsString::from).collect())
+            .unwrap()
+            .unwrap()
+    }
+
+    #[test]
+    fn clang_options_keep_their_separate_values() {
+        let cfg = args(&[
+            "-I", "inc", "-Iother", "-D", "X=1", "-std=c11", "a.c", "-o", "a.elf",
+        ]);
+        let clang: Vec<String> = cfg
+            .clang_args
+            .iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(clang, ["-I", "inc", "-Iother", "-D", "X=1", "-std=c11"]);
+        assert_eq!(cfg.inputs, [PathBuf::from("a.c")]);
+        assert_eq!(cfg.output, Some(PathBuf::from("a.elf")));
+    }
+
+    #[test]
+    fn missing_option_value_is_an_error() {
+        assert!(parse_args(vec![OsString::from("a.c"), OsString::from("-I")]).is_err());
+    }
 }
