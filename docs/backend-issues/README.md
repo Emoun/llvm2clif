@@ -475,7 +475,7 @@ The cubic compile time (above) determines which Embench benchmarks are
 practical. `aha-mont64` (`benchmark_body`: one basic block of 1006
 instructions after inlining and the 64-bit lowering) and `nettle-sha256`
 (`_nettle_sha256_compress`: a block of 837 instructions, the rounds being
-unrolled by hand in the source) take over 30 minutes each to compile; the
+unrolled by hand in the source) did not finish compiling within two hours; the
 other benchmarks compile in 0.2 to 8.5 seconds, and `aha-mont64` compiles
 in 0.6 seconds when inlining is disabled.
 

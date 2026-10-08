@@ -65,8 +65,8 @@ stack address.
 
 **Compile time.** The backend's compile time grows cubically with the size
 of a basic block (see the open issue in `docs/backend-issues`), and the two
-benchmarks with very long straight-line blocks take over 30 minutes each
-to compile; the others compile in under 10 seconds. `aha-mont64`'s block is
+benchmarks with very long straight-line blocks did not finish compiling
+within two hours; the others compile in under 10 seconds. `aha-mont64`'s block is
 the benchmark loop with everything inlined, and what makes it slow is not
 its length but the loop nesting (issue 14, with a 30-instruction
 reproducer); built with `--cflags=-fno-inline-functions` (the `=` form,
