@@ -268,6 +268,11 @@ impl<'a, 'm> FuncTranslator<'a, 'm> {
         if is_native(bits) {
             return v;
         }
+        if bits == 1 {
+            // A boolean container holds 0 or 1; negating it is the sign
+            // extension (0 or -1), without the signed shift.
+            return self.b.ins().ineg(v);
+        }
         let c = container(bits);
         let sh = self.iconst(c, (c.bits() - bits) as u64);
         let t = self.b.ins().ishl(v, sh);
@@ -277,6 +282,11 @@ impl<'a, 'm> FuncTranslator<'a, 'm> {
     /// Sign-extends a container value of `from_bits` bits to the container
     /// type `to` (truncating when `to` is narrower).
     pub(super) fn emit_sextend(&mut self, v: Value, from_bits: u32, to: types::Type) -> Value {
+        if from_bits == 1 {
+            // Widen the boolean first so that no signed operation is needed.
+            let z = self.resize_unsigned(v, types::I8, to);
+            return self.b.ins().ineg(z);
+        }
         let s = self.sext_in(v, from_bits);
         let fc = container(from_bits);
         if fc == to {
