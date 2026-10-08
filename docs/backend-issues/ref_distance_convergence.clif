@@ -1,0 +1,37 @@
+; Issue 13: "Reference distance assignment did not converge" (crash).
+;
+; The backend (rust-wasmtime fad5e62) panics while compiling this function:
+;   cranelift/codegen/src/isa/scry/mod.rs:3827:13:
+;   Reference distance assignment did not converge
+; The loop in `compile_function` that alternates `insert_ref_distances`,
+; `widen_far_jumps` and `fix_orderings` gives up after 16 rounds.
+;
+; What it takes, found by cutting down Embench's picojpeg `pjpeg_decode_init`
+; with tools/reduce_clif.py and tools/reduce_clif_blocks.py:
+;   * a `br_table` in a block other than the entry block (with the table in
+;     block0 it compiles), with 10 to 12 entries (2 to 9 and 16 compile);
+;   * its first target taking three arguments (two compile);
+;   * that block branching on to another three-parameter block (without
+;     block3 it compiles).
+; Expected: 0 for the inputs 3 and 0, i.e. the second parameter is returned
+; after the table jump:
+;   llvm2clif ref_distance_convergence.clif -o repro.o
+;   wild -flavor gnu -m elf32scry -e ref_distance_convergence -z noexecstack -o repro.elf repro.o
+;   scryer repro.elf --target=scry32-unknown-none-elf -i=3u32 -i=0u8   ; 0u8
+
+function %ref_distance_convergence(i32 uext, i8 uext) -> i8 uext system_v {
+block0(v0: i32, v1: i8):
+    jump block1
+
+block1:
+    br_table v0, block4(v1), [block2(v1, v0, v1), block4(v1), block4(v1), block4(v1), block4(v1), block4(v1), block4(v1), block4(v1), block4(v1), block4(v1)]
+
+block2(v2: i8, v3: i32, v4: i8):
+    brif v1, block4(v1), block3(v1, v0, v1)
+
+block3(v5: i8, v6: i32, v7: i8):
+    brif v1, block4(v1), block4(v1)
+
+block4(v8: i8):
+    return v8
+}

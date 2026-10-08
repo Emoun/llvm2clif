@@ -1,0 +1,20 @@
+; Issue 11: type-analysis panic on a function with a sub-word parameter.
+;
+; The backend (rust-wasmtime fad5e62) panics while compiling this function:
+;   cranelift/codegen/src/isa/scry/mod.rs:2074:51:
+;   called `Option::unwrap()` on a `None` value
+; in `type_analysis`, where the entry block's parameter registers are zipped
+; with the signature and refined to the ABI types. Returning v1 or v2 (an i32
+; parameter that follows the i16 one) panics; returning the i16 parameter
+; itself, or a function with only two parameters, compiles. See the README
+; for the variants that were tried.
+;
+; From Embench's edn (`codebook`, which has eight parameters). Expected:
+;   llvm2clif subword_param_typing.clif -o repro.o
+;   wild -flavor gnu -m elf32scry -e subword_param_typing -z noexecstack -o repro.elf repro.o
+;   scryer repro.elf --target=scry32-unknown-none-elf -i=5i16 -i=7u32 -i=9u32   ; 7u32
+
+function %subword_param_typing(i16 sext, i32 uext, i32 uext) -> i32 uext system_v {
+block0(v0: i16, v1: i32, v2: i32):
+    return v1
+}

@@ -33,7 +33,14 @@ issues were found on `cfd59dc`, `faad34b`, `21187c1`, `504ebe1` and
 | 8. re-tagging of `smax`/`smin` results | fixed in `a5daf64` |
 | 9. unsigned result tag of `iabs` | fixed in `504ebe1` |
 | 10. return values not re-tagged to the signature | fixed in `fad5e62` |
+| 11. type-analysis panic on a function with a sub-word parameter | open |
+| 12. type-analysis panic on a comparison result used through `sshr` | open |
+| 13. reference distance assignment does not converge | open |
 | compile time cubic in the block size | open |
+| simulator: 4 KiB stack and 64 KiB image | open (limits) |
+
+Issues 11 to 13 and the simulator limits were found by running
+[Embench-IoT](../../benchmarks/embench/README.md) on the toolchain.
 
 ## 1. `echo.l` forwards every queued operand (wrong results)
 
@@ -323,3 +330,148 @@ passed to a `uext` parameter is re-tagged at the call in 12 of 12 compiles
 (tested with `smin`/`smax` results in both argument orders). The same
 re-tagging at the return would close this. `rettag.c` fails in about 3 of
 12 compiles, only for the cases whose sorted value is negative.
+
+## 11. Type-analysis panic on a function with a sub-word parameter (crash)
+
+**Reproducer:** `subword_param_typing.clif` (panics; expected to return its
+second parameter).
+
+```
+function %subword_param_typing(i16 sext, i32 uext, i32 uext) -> i32 uext {
+block0(v0: i16, v1: i32, v2: i32):
+    return v1
+}
+```
+
+The backend panics in `type_analysis` (`isa/scry/mod.rs:2074`, `called
+Option::unwrap() on a None value`) where the entry block's parameter
+registers are zipped with the signature and each register's type is refined
+to the ABI type: one register already carries a type that conflicts with the
+signature entry it is paired with. The variants tried:
+
+| parameters | returns | result |
+|------------|---------|--------|
+| `i16 sext, i32 uext` | v1 | compiles |
+| `i16 sext, i32 uext, i32 uext` | v1 | **panics** |
+| `i16 sext, i32 uext ×3` | v1 | **panics** |
+| `i16 sext, i32 uext ×3` | v3 | compiles |
+| `i16 sext, i32 uext ×4` | v3 | **panics** |
+| `i16 sext, i32 uext ×4` | v4 | compiles |
+| `i16 sext, i32 uext ×5` | v3 or v4 | **panics** |
+| `i16 sext, i32 uext ×5` | v0 (sign-extended) or v5 | compiles |
+| `i32 uext ×5, i16 sext` or `i8 sext` or `i16 uext` | v3 or v4 | **panics** |
+| `i32 uext ×5, i16 sext` | v5 (sign-extended) | compiles |
+| `i32 uext ×4, i16 sext` | v4 (sign-extended), or v0 | compiles |
+| `i32 uext ×6, i16 sext ×2` | v4 | **panics** |
+| `i32 uext ×6, i16 sext ×2` | v0 | compiles |
+| `i32 uext ×8` | v4 | compiles |
+
+So an 8-, 16-bit parameter anywhere in the list, together with the use of
+some (not every) 32-bit parameter, is enough; which parameter positions
+fail suggests that the entry block's register list and the signature are
+paired up in different orders once a sub-word parameter is present. In
+Embench this stops `edn` (`codebook`, eight parameters of which two are
+`short`); any C function such as `int f(short a, int b, int c) { return b; }`
+is affected.
+
+## 12. Type-analysis panic on a comparison result used through `sshr` (crash)
+
+**Reproducer:** `cmp_result_sshr.clif` (panics; expected 2 for the input 5).
+
+```
+function %cmp_result_sshr(i32 uext) -> i8 uext {
+block0(v0: i32):
+    v1 = iconst.i32 -1
+    v2 = icmp sgt v0, v1
+    v3 = iconst.i8 0
+    v4 = sshr v2, v3
+    v5 = iadd v2, v4
+    return v5
+}
+```
+
+`resolve_instruction_types` (`isa/scry/mod.rs:2672`) insists that the result
+of a comparison is a `u8` boolean, but by the time the `IntCmp` arm runs, the
+signed shift has demanded a signed type for the same register, and the
+conflict is unwrapped instead of being resolved with a re-tagging cast (as
+other conflicts are). The second use of the comparison result (the `iadd`
+here; a `select` or a second comparison in the original) is needed: with the
+shift alone, or when the function returns `i8 sext`, everything is typed
+signed and it compiles. Using `ishl 7` before the `sshr 7` (the original
+form) fails the same way.
+
+The pattern comes from clang's `sext i1` (`s < 0 ? 0 : 255` in Embench's
+picojpeg `clamp`), which llvm2clif lowered as `ishl 7; sshr 7` of the i8
+comparison result. It now lowers a one-bit sign extension as `ineg` of the
+zero-extended boolean, which needs no signed operation at all and is one
+instruction shorter, so translated code no longer contains the pattern; the
+backend still crashes on the reproducer.
+
+## 13. Reference distance assignment does not converge (crash)
+
+**Reproducer:** `ref_distance_convergence.clif` (panics; expected to return
+its second parameter).
+
+```
+function %ref_distance_convergence(i32 uext, i8 uext) -> i8 uext {
+block0(v0: i32, v1: i8):
+    jump block1
+
+block1:
+    br_table v0, block4(v1), [block2(v1, v0, v1), block4(v1), block4(v1), block4(v1), block4(v1), block4(v1), block4(v1), block4(v1), block4(v1), block4(v1)]
+
+block2(v2: i8, v3: i32, v4: i8):
+    brif v1, block4(v1), block3(v1, v0, v1)
+
+block3(v5: i8, v6: i32, v7: i8):
+    brif v1, block4(v1), block4(v1)
+
+block4(v8: i8):
+    return v8
+}
+```
+
+The fixed-point loop in `compile_function` (`isa/scry/mod.rs:3827`) that
+alternates `insert_ref_distances`, `widen_far_jumps` and `fix_orderings`
+gives up after 16 rounds with `Reference distance assignment did not
+converge`: widening a jump inserts instructions, which changes the
+reference distances, which changes the orderings, and for this shape the
+two keep undoing each other. Found in Embench's picojpeg
+(`pjpeg_decode_init` at `-O2` and `-Os`, `pjpeg_decode_mcu` at `-O1`; the
+uninlined build compiles). The function was cut down automatically with
+`tools/reduce_clif.py` (instructions) and `tools/reduce_clif_blocks.py`
+(blocks) and then simplified by hand. Three things are needed together:
+
+* a `br_table` outside the entry block with 10 to 12 entries (2 to 9 and
+  16 entries compile, so it is about the distance the table jump has to
+  cover, not the table itself);
+* a first target with three block parameters (two compile);
+* that target branching on to a second three-parameter block.
+
+Whether the block arguments are function parameters or constants does not
+matter; a 10-entry table in the entry block compiles unless the arguments
+are constants defined in that block.
+
+## Simulator limits: 4 KiB stack, 64 KiB image
+
+`scryer` places the stack at address `0x10000` with a 4 KiB buffer
+(`stack_base = 1 << 16; stack_buffer = 1 << 12` in `src/lib.rs`), and
+stack reservations are powers of two. Two Embench benchmarks do not fit:
+
+* `huffbench`: `compdecomp` has about 5 KiB of local arrays; the simulator
+  panics at start-up with `TODO: Reserve inadequate buffer`
+  (`scry_sim/src/execution.rs:359`).
+* `nsichneu`: the program image is 68 KiB, so the loaded segments overlap
+  the stack block and the simulator panics with `assertion failed:
+  self.blocks.iter().all(...)` (`scry_sim/src/memory.rs:305`).
+
+With the two constants raised (a 1 MiB stack at 16 MiB), both benchmarks
+run and verify. Neither panic is a clean error message.
+
+## Compile time: Embench data points
+
+The cubic compile time (above) determines which Embench benchmarks are
+practical. `aha-mont64` (`benchmark_body`: one basic block of 1006
+instructions after the 64-bit lowering) and `nettle-sha256`
+(`_nettle_sha256_compress`: a block of 837 instructions) take over 30
+minutes each to compile; the other benchmarks compile in 0.2 to 8.5 seconds.

@@ -1,0 +1,29 @@
+; Issue 12: type-analysis panic on a comparison result used through `sshr`.
+;
+; The backend (rust-wasmtime fad5e62) panics while compiling this function:
+;   cranelift/codegen/src/isa/scry/mod.rs:2672:26:
+;   called `Option::unwrap()` on a `None` value
+; in the `IntCmp` arm of `resolve_instruction_types`: the comparison result
+; must be a u8 boolean, but the signed shift has already demanded a signed
+; type for the same register, and the conflict is unwrapped instead of being
+; resolved with a re-tagging cast. Any other use of the comparison result
+; next to the shifted one triggers it (an `iadd` here, a `select` or a second
+; comparison in the original); returning the sum as `i8 sext` compiles.
+;
+; The pattern comes from clang's `sext i1` (e.g. `s < 0 ? 0 : 255` in
+; Embench's picojpeg), which llvm2clif used to lower as `ishl 7; sshr 7` on
+; the i8 comparison result; it now uses `ineg`, so the pattern no longer
+; appears in translated code. Expected:
+;   llvm2clif cmp_result_sshr.clif -o repro.o
+;   wild -flavor gnu -m elf32scry -e cmp_result_sshr -z noexecstack -o repro.elf repro.o
+;   scryer repro.elf --target=scry32-unknown-none-elf -i=5u32   ; 2u8 (1 + (1 >> 0))
+
+function %cmp_result_sshr(i32 uext) -> i8 uext system_v {
+block0(v0: i32):
+    v1 = iconst.i32 -1
+    v2 = icmp sgt v0, v1
+    v3 = iconst.i8 0
+    v4 = sshr v2, v3
+    v5 = iadd v2, v4
+    return v5
+}
