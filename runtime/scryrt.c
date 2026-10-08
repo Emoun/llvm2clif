@@ -63,6 +63,22 @@ int memcmp(const void *a, const void *b, size_t n)
     return 0;
 }
 
+/* LLVM also emits memchr and bcmp on its own (from strchr/memcmp with
+   known lengths), so the runtime provides them. */
+void *memchr(const void *s, int c, size_t n)
+{
+    const unsigned char *p = s;
+    for (size_t i = 0; i < n; i++)
+        if (p[i] == (unsigned char)c)
+            return (void *)(p + i);
+    return 0;
+}
+
+int bcmp(const void *a, const void *b, size_t n)
+{
+    return memcmp(a, b, n);
+}
+
 size_t strlen(const char *s)
 {
     size_t n = 0;

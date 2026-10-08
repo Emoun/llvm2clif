@@ -10,8 +10,13 @@ use std::process::Command;
 /// Source of the runtime library and its headers, embedded so that the
 /// driver is self-contained.
 pub const RUNTIME_SOURCE: &str = include_str!("../runtime/scryrt.c");
-pub const RUNTIME_STRING_H: &str = include_str!("../runtime/include/string.h");
-pub const RUNTIME_STDLIB_H: &str = include_str!("../runtime/include/stdlib.h");
+pub const RUNTIME_HEADERS: &[(&str, &str)] = &[
+    ("string.h", include_str!("../runtime/include/string.h")),
+    ("stdlib.h", include_str!("../runtime/include/stdlib.h")),
+    ("ctype.h", include_str!("../runtime/include/ctype.h")),
+    ("assert.h", include_str!("../runtime/include/assert.h")),
+    ("stdio.h", include_str!("../runtime/include/stdio.h")),
+];
 
 /// The default clang target: a 32-bit little-endian target whose data layout
 /// matches Scry (ILP32, no native 64-bit integers).
@@ -187,8 +192,9 @@ pub fn run(cfg: &Config) -> anyhow::Result<()> {
     // without a system C library.
     let include_dir = temps.path.join("include");
     std::fs::create_dir_all(&include_dir)?;
-    std::fs::write(include_dir.join("string.h"), RUNTIME_STRING_H)?;
-    std::fs::write(include_dir.join("stdlib.h"), RUNTIME_STDLIB_H)?;
+    for (name, text) in RUNTIME_HEADERS {
+        std::fs::write(include_dir.join(name), text)?;
+    }
 
     let mut objects: Vec<PathBuf> = Vec::new();
     let mut extra_link_inputs: Vec<PathBuf> = Vec::new();
