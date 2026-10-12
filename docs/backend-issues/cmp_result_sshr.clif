@@ -1,6 +1,7 @@
+; Fixed in rust-wasmtime f9fa226; kept as a regression check.
 ; Issue 12: type-analysis panic on a comparison result used through `sshr`.
 ;
-; The backend (rust-wasmtime fad5e62) panics while compiling this function:
+; The backend (rust-wasmtime fad5e62) panicked while compiling this function:
 ;   cranelift/codegen/src/isa/scry/mod.rs:2672:26:
 ;   called `Option::unwrap()` on a `None` value
 ; in the `IntCmp` arm of `resolve_instruction_types`: the comparison result

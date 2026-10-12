@@ -17,11 +17,11 @@ The translator's own correctness is checked independently of the backend by
 running the translated CLIF in Cranelift's interpreter (`cargo test --test
 interp`), which passes for every program that the interpreter can run.
 
-Status with the backend revision llvm2clif builds against (`fad5e62`; the
-issues were found on `cfd59dc`, `faad34b`, `21187c1`, `504ebe1` and
-`a5daf64`):
+Status with the backend revision llvm2clif builds against (`f9fa226`; the
+issues were found on `cfd59dc`, `faad34b`, `21187c1`, `504ebe1`, `a5daf64`
+and `fad5e62`):
 
-| issue | status at `fad5e62` |
+| issue | status at `f9fa226` |
 |-------|---------------------|
 | 1. `echo.l` forwards every queued operand | fixed in `faad34b` |
 | 2. type-tag conflicts on block parameters | fixed in `faad34b` |
@@ -33,9 +33,9 @@ issues were found on `cfd59dc`, `faad34b`, `21187c1`, `504ebe1` and
 | 8. re-tagging of `smax`/`smin` results | fixed in `a5daf64` |
 | 9. unsigned result tag of `iabs` | fixed in `504ebe1` |
 | 10. return values not re-tagged to the signature | fixed in `fad5e62` |
-| 11. type-analysis panic on a function with a sub-word parameter | open |
-| 12. type-analysis panic on a comparison result used through `sshr` | open |
-| 13. reference distance assignment does not converge | open |
+| 11. type-analysis panic on a function with a sub-word parameter | fixed in `f9fa226` |
+| 12. type-analysis panic on a comparison result used through `sshr` | fixed in `f9fa226` |
+| 13. reference distance assignment does not converge | fixed in `f9fa226` |
 | 14. compile time explodes on nested loops with long-lived values | open |
 | compile time cubic in the block size | open |
 | simulator: 4 KiB stack and 64 KiB image | open (limits) |
@@ -334,8 +334,12 @@ re-tagging at the return would close this. `rettag.c` fails in about 3 of
 
 ## 11. Type-analysis panic on a function with a sub-word parameter (crash)
 
-**Reproducer:** `subword_param_typing.clif` (panics; expected to return its
-second parameter).
+**Fixed in `f9fa226`**: the reproducer and every variant in the table
+below compile, and the reproducer returns its second parameter. The
+description below is kept for reference.
+
+**Reproducer:** `subword_param_typing.clif` (panicked; expected to return
+its second parameter).
 
 ```
 function %subword_param_typing(i16 sext, i32 uext, i32 uext) -> i32 uext {
@@ -377,7 +381,11 @@ is affected.
 
 ## 12. Type-analysis panic on a comparison result used through `sshr` (crash)
 
-**Reproducer:** `cmp_result_sshr.clif` (panics; expected 2 for the input 5).
+**Fixed in `f9fa226`**: the comparison result is re-tagged on its way to
+the signed use, and the reproducer returns 2 for the input 5 and 0 for -5.
+The description below is kept for reference.
+
+**Reproducer:** `cmp_result_sshr.clif` (panicked; expected 2 for the input 5).
 
 ```
 function %cmp_result_sshr(i32 uext) -> i8 uext {
@@ -410,8 +418,13 @@ backend still crashes on the reproducer.
 
 ## 13. Reference distance assignment does not converge (crash)
 
-**Reproducer:** `ref_distance_convergence.clif` (panics; expected to return
-its second parameter).
+**Fixed in `f9fa226`**: a bridge now keeps its value's place among an
+order-sensitive consumer's operands, and the reproducer compiles and
+returns its second parameter for every table index. The description below
+is kept for reference.
+
+**Reproducer:** `ref_distance_convergence.clif` (panicked; expected to
+return its second parameter).
 
 ```
 function %ref_distance_convergence(i32 uext, i8 uext) -> i8 uext {
@@ -467,7 +480,8 @@ stack reservations are powers of two. Two Embench benchmarks do not fit:
   self.blocks.iter().all(...)` (`scry_sim/src/memory.rs:305`).
 
 With the two constants raised (a 1 MiB stack at 16 MiB), both benchmarks
-run and verify. Neither panic is a clean error message.
+run and verify, as does `picojpeg` (a 73 KiB image) once issues 12 and 13
+no longer stop it. Neither panic is a clean error message.
 
 ## Compile time: Embench data points
 

@@ -21,14 +21,14 @@ clap = { version = "4", features = ["derive"] }
 env_logger = { version = "0.11", default-features = false }
 
 # Cranelift with the Scry backend, from the Scry project's wasmtime fork.
-cranelift-codegen = { git = "https://github.com/Scry-arch/rust-wasmtime.git", rev = "fad5e62665e79ac87584160e1d963f0f6f14edc5", features = ["scry"] }
-cranelift-frontend = { git = "https://github.com/Scry-arch/rust-wasmtime.git", rev = "fad5e62665e79ac87584160e1d963f0f6f14edc5" }
-cranelift-module = { git = "https://github.com/Scry-arch/rust-wasmtime.git", rev = "fad5e62665e79ac87584160e1d963f0f6f14edc5" }
-cranelift-object = { git = "https://github.com/Scry-arch/rust-wasmtime.git", rev = "fad5e62665e79ac87584160e1d963f0f6f14edc5" }
-cranelift-reader = { git = "https://github.com/Scry-arch/rust-wasmtime.git", rev = "fad5e62665e79ac87584160e1d963f0f6f14edc5" }
+cranelift-codegen = { git = "https://github.com/Scry-arch/rust-wasmtime.git", rev = "f9fa226eb1c2f5d50fb5d888d7435004e02e1040", features = ["scry"] }
+cranelift-frontend = { git = "https://github.com/Scry-arch/rust-wasmtime.git", rev = "f9fa226eb1c2f5d50fb5d888d7435004e02e1040" }
+cranelift-module = { git = "https://github.com/Scry-arch/rust-wasmtime.git", rev = "f9fa226eb1c2f5d50fb5d888d7435004e02e1040" }
+cranelift-object = { git = "https://github.com/Scry-arch/rust-wasmtime.git", rev = "f9fa226eb1c2f5d50fb5d888d7435004e02e1040" }
+cranelift-reader = { git = "https://github.com/Scry-arch/rust-wasmtime.git", rev = "f9fa226eb1c2f5d50fb5d888d7435004e02e1040" }
 
 [dev-dependencies]
-cranelift-interpreter = { git = "https://github.com/Scry-arch/rust-wasmtime.git", rev = "fad5e62665e79ac87584160e1d963f0f6f14edc5" }
+cranelift-interpreter = { git = "https://github.com/Scry-arch/rust-wasmtime.git", rev = "f9fa226eb1c2f5d50fb5d888d7435004e02e1040" }
 
 [profile.release]
 debug = false

@@ -247,13 +247,13 @@ with minimal reproducers, in
 [docs/backend-issues/README.md](docs/backend-issues/README.md), together
 with their status for the backend revision this tool builds against. The ten
 issues found with the test programs are fixed in that revision, and all 23
-test programs run on the simulator. Open there: three backend crashes found
-with Embench (a function with a `short` parameter, a comparison result
-shifted with `sshr`, and a reference-distance fixed point that does not
-converge), a compile-time explosion on nested loops (a 30-instruction
-function that does not compile in 15 minutes, which is what stops
-`aha-mont64`), code generation that is not deterministic (the same input
-compiles to different objects, which so far only matters for
+test programs run on the simulator, as are the three backend crashes that
+Embench found (a function with a `short` parameter, a comparison result
+shifted with `sshr`, and a reference-distance fixed point that did not
+converge). Open there: a compile-time explosion on nested loops (a
+30-instruction function that does not compile in 15 minutes, which is what
+stops `aha-mont64`), code generation that is not deterministic (the same
+input compiles to different objects, which so far only matters for
 reproducibility), and compile time that grows cubically with the size of a
 basic block (a thousand-instruction block takes well over a minute). The
 simulator's fixed 4 KiB stack and 64 KiB image limit stop two more

@@ -1,6 +1,7 @@
+; Fixed in rust-wasmtime f9fa226; kept as a regression check.
 ; Issue 13: "Reference distance assignment did not converge" (crash).
 ;
-; The backend (rust-wasmtime fad5e62) panics while compiling this function:
+; The backend (rust-wasmtime fad5e62) panicked while compiling this function:
 ;   cranelift/codegen/src/isa/scry/mod.rs:3827:13:
 ;   Reference distance assignment did not converge
 ; The loop in `compile_function` that alternates `insert_ref_distances`,
