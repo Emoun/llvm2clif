@@ -50,7 +50,7 @@ With rust-wasmtime `f9fa226`, scryer `6fc6ac9` and wild `2b9f2b4`:
 | nsichneu | simulator limit | passes with the stack moved up (16.7 M); its 68 KiB image overlaps the stack at 64 KiB |
 | picojpeg | simulator limit | passes with the stack moved up (15.4 M); its 73 KiB image overlaps the stack at 64 KiB. Was stopped by backend issues 12 and 13 before `f9fa226` |
 | aha-mont64 | backend bug | [issue 14](../../docs/backend-issues/README.md): the inlined loop does not compile in 30 minutes; passes with `--cflags=-fno-inline-functions` (67.3 M, compiles in 0.5 s) |
-| nettle-sha256 | compile time | one 837-instruction block (the rounds are unrolled by hand, so no flag helps); see below |
+| nettle-sha256 | compile time | one 837-instruction block (the rounds are unrolled by hand, so no flag helps: the block is the same size at `-O1` and `-Oz`); see below |
 | wikisort | unsupported | calls `sqrt` on a `double`; no floating point on Scry |
 
 Instruction counts are scryer's `InstructionReads` for one iteration
