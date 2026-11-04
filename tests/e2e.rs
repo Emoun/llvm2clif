@@ -216,10 +216,12 @@ fn check_program(tools: &Tools, src: &Path) {
                 case.args, case.expected, v as i32
             )),
             None => {
-                // Keep the simulator's error line, drop its metrics dump.
+                // Keep the simulator's error line, drop its metrics or event dump.
                 let brief: Vec<&str> = stdout
                     .lines()
-                    .take_while(|l| !l.contains("Simulation Metrics"))
+                    .take_while(|l| {
+                        !l.contains("Simulation Metrics") && !l.contains("Simulation Events")
+                    })
                     .filter(|l| !l.trim().is_empty())
                     .collect();
                 let stderr = String::from_utf8_lossy(&out.stderr);

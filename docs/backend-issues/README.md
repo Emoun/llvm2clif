@@ -3,7 +3,7 @@
 While developing llvm2clif, several problems surfaced in the Scry Cranelift
 backend ([Scry-arch/rust-wasmtime](https://github.com/Scry-arch/rust-wasmtime))
 and the simulator ([Scry-arch/scryer](https://github.com/Scry-arch/scryer),
-commit `6fc6ac9`). They are outside this repository, but they determine which
+commit `8e73d4a`; the issues were found on `6fc6ac9`). They are outside this repository, but they determine which
 programs run correctly end to end, so they are documented here together with
 minimal reproducers. The reproducer `.clif` files can be compiled directly:
 
@@ -38,7 +38,9 @@ and `fad5e62`):
 | 13. reference distance assignment does not converge | fixed in `f9fa226` |
 | 14. compile time explodes on nested loops with long-lived values | open |
 | compile time cubic in the block size | open |
-| simulator: 4 KiB stack and 64 KiB image | open (limits) |
+| simulator: 4 KiB stack pool | open (limit) |
+| simulator: 64 KiB image | fixed in scryer `8059eee` (1 MiB) |
+| simulator: event recording cost | open (see below) |
 
 Issues 11 to 14 and the simulator limits were found by running
 [Embench-IoT](../../benchmarks/embench/README.md) on the toolchain.
@@ -105,6 +107,14 @@ through unsigned ones; that rewrite was removed once the backend handled
 the conflicts (the remaining tag problems are issues 7 to 9).
 
 ## 3. `.bss` is loaded as uninitialized memory (simulator)
+
+**Still open at scryer `8e73d4a`.** The loader creates every `PT_LOAD`
+segment's memory zeroed but marks it uninitialized, writes the file bytes
+over it, and a load from the NOBITS tail (`p_memsz` beyond `p_filesz`)
+panics in `scry_sim`'s `perform_load` with `not yet implemented`
+(`execution.rs:573`); `6fc6ac9` did the same. A build of llvm2clif that
+emits a real `.bss` (one line in `src/emit.rs`, `define_zeroinit` instead
+of explicit zeros) reproduces it with `bss_uninitialized.c`.
 
 **Reproducer:** `bss_uninitialized.c`.
 
@@ -466,11 +476,14 @@ Whether the block arguments are function parameters or constants does not
 matter; a 10-entry table in the entry block compiles unless the arguments
 are constants defined in that block.
 
-## Simulator limits: 4 KiB stack, 64 KiB image
+## Simulator limits: 4 KiB stack pool, 64 KiB image
 
-`scryer` places the stack at address `0x10000` with a 4 KiB buffer
-(`stack_base = 1 << 16; stack_buffer = 1 << 12` in `src/lib.rs`), and
-stack reservations are powers of two. Two Embench benchmarks do not fit:
+`scryer` placed the stack at address `0x10000` with a 4 KiB pool for stack
+growth (`stack_base = 1 << 16; stack_buffer = 1 << 12` in `src/lib.rs`),
+and stack reservations are powers of two. Since scryer `8059eee` the stack
+is at 1 MiB, so images up to 1 MiB load and `nsichneu` and `picojpeg` run
+on the stock simulator; the 4 KiB pool is unchanged and still stops
+`huffbench`. Two Embench benchmarks did not fit at `6fc6ac9`:
 
 * `huffbench`: `compdecomp` has about 5 KiB of local arrays; the simulator
   panics at start-up with `TODO: Reserve inadequate buffer`
@@ -481,7 +494,24 @@ stack reservations are powers of two. Two Embench benchmarks do not fit:
 
 With the two constants raised (a 1 MiB stack at 16 MiB), both benchmarks
 run and verify, as does `picojpeg` (a 73 KiB image) once issues 12 and 13
-no longer stop it. Neither panic is a clean error message.
+no longer stop it. Neither panic is a clean error message. Which of
+`huffbench`'s reservations exceeds the pool is not obvious from outside:
+functions with 6 KB and 20 KB local arrays, also nested, run fine, since a
+frame's own (base) reservation only takes the part of the pool it is
+missing.
+
+## Simulator: event recording (scryer `8e73d4a`)
+
+`8e73d4a` replaces the metrics (`InstructionReads`, ...) by an event log
+that `--print-events` prints after the run: every instruction with its
+address and disassembly, every operand produced or forwarded with its type,
+stack and memory events. This is the trace that was missing when the
+wrong-result issues above had to be isolated by black-box experiments. The
+log is kept in memory whether or not it is printed: a 40-million-instruction
+run takes 6.5 GB and twice the time of `6fc6ac9` (61 s against 30 s), the
+Embench benchmarks need 2 to 6 GB each, and nothing cheaper reports an
+instruction count any more. After an error the whole log is printed; after
+a panic (the `.bss` read, the stack pool) nothing is.
 
 ## Compile time: Embench data points
 

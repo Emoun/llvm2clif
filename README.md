@@ -91,7 +91,8 @@ scry-cc sum.c -o sum.elf
 scryer sum.elf --target=scry32-unknown-none-elf
 ```
 
-prints the returned operand (`40u32`) and the simulation metrics. With
+prints the returned operand (`40u32`); `--print-events` adds a trace of
+every simulated step. With
 `--machine-mode` the simulator instead exits with the program's return value
 as its exit code:
 
@@ -237,8 +238,12 @@ simulator's `-i` inputs.
 ### Simulator limits
 
 `scryer` maps the program at address 0 and places the stack at address
-0x10000 with 4 KiB of stack memory, so a program image (code + data) must stay
-below 64 KiB and deep recursion or large local arrays overflow the stack.
+0x100000 (1 MiB; 64 KiB before scryer `8059eee`) with a 4 KiB pool for
+stack growth, so a program image (code + data) must stay below 1 MiB, and a
+program whose stack reservations exhaust the pool stops with a panic. The
+simulator records every event of a run in memory (about 160 bytes per
+simulated instruction) and so needs several GB for runs of tens of millions
+of instructions.
 
 ## Known issues in the Scry backend and simulator
 
@@ -256,8 +261,7 @@ stops `aha-mont64`), code generation that is not deterministic (the same
 input compiles to different objects, which so far only matters for
 reproducibility), and compile time that grows cubically with the size of a
 basic block (a thousand-instruction block takes well over a minute). The
-simulator's fixed 4 KiB stack and 64 KiB image limit stop two more
-benchmarks. `llvm2clif` keeps one workaround: explicit zero bytes instead
+simulator's fixed 4 KiB stack pool stops one more benchmark. `llvm2clif` keeps one workaround: explicit zero bytes instead
 of `.bss`, which the simulator does not zero-fill.
 
 ## Tests
