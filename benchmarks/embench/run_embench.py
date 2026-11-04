@@ -6,6 +6,7 @@ the result. Results go to <out>/results.json and <out>/<bench>/*.log; see
 README.md in this directory for the expected outcomes.
 
 Usage: python3 benchmarks/embench/run_embench.py [--only crc32,edn] [--jobs 2]
+       [--sim-args="--stack-buffer 1048576"]
 The Embench sources are cloned into benchmarks/embench/embench-iot (at the
 pinned commit) unless --repo points at a checkout. scry-cc finds wild and
 scryer on PATH or through SCRY_WILD and SCRY_SCRYER.
@@ -101,7 +102,7 @@ def one(a, bench):
     if a.no_run:
         r.update(status="built", detail="")
         return r
-    rc, o, e, dt, to = run([a.scryer, str(elf), "--target=scry32-unknown-none-elf"], a.run_timeout, out / "run.log")
+    rc, o, e, dt, to = run([a.scryer, str(elf), "--target=scry32-unknown-none-elf", *a.sim_args.split()], a.run_timeout, out / "run.log")
     r["run_s"] = round(dt, 1)
     r.update(parse_run(rc, o, e, to, a.run_timeout))
     return r
@@ -147,6 +148,7 @@ def main():
     ap.add_argument("--only", default="", help="comma-separated benchmark names")
     ap.add_argument("--skip", default="")
     ap.add_argument("--cflags", default="")
+    ap.add_argument("--sim-args", default="", help="extra scryer arguments, e.g. --sim-args=\"--stack-buffer 1048576\"")
     ap.add_argument("--warmup", default="1")
     ap.add_argument("--gsf", default="1")
     ap.add_argument("--no-run", action="store_true")

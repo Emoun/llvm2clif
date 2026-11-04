@@ -3,7 +3,7 @@
 While developing llvm2clif, several problems surfaced in the Scry Cranelift
 backend ([Scry-arch/rust-wasmtime](https://github.com/Scry-arch/rust-wasmtime))
 and the simulator ([Scry-arch/scryer](https://github.com/Scry-arch/scryer),
-commit `8e73d4a`; the issues were found on `6fc6ac9`). They are outside this repository, but they determine which
+commit `eb7d2b5`; the issues were found on `6fc6ac9`). They are outside this repository, but they determine which
 programs run correctly end to end, so they are documented here together with
 minimal reproducers. The reproducer `.clif` files can be compiled directly:
 
@@ -38,9 +38,9 @@ and `fad5e62`):
 | 13. reference distance assignment does not converge | fixed in `f9fa226` |
 | 14. compile time explodes on nested loops with long-lived values | open |
 | compile time cubic in the block size | open |
-| simulator: 4 KiB stack pool | open (limit) |
-| simulator: 64 KiB image | fixed in scryer `8059eee` (1 MiB) |
-| simulator: event recording cost | open (see below) |
+| simulator: 4 KiB stack pool | configurable since scryer `eb7d2b5` (`--stack-buffer`) |
+| simulator: 64 KiB image | fixed in scryer `8059eee` (1 MiB, `--stack-base` since `eb7d2b5`) |
+| simulator: event recording cost | partly fixed in `8d53ed1` (streaming); still recorded when not printed |
 
 Issues 11 to 14 and the simulator limits were found by running
 [Embench-IoT](../../benchmarks/embench/README.md) on the toolchain.
@@ -482,8 +482,12 @@ are constants defined in that block.
 growth (`stack_base = 1 << 16; stack_buffer = 1 << 12` in `src/lib.rs`),
 and stack reservations are powers of two. Since scryer `8059eee` the stack
 is at 1 MiB, so images up to 1 MiB load and `nsichneu` and `picojpeg` run
-on the stock simulator; the 4 KiB pool is unchanged and still stops
-`huffbench`. Two Embench benchmarks did not fit at `6fc6ac9`:
+on the stock simulator, and since `eb7d2b5` both numbers are options:
+`--stack-base <ADDRESS>` (hexadecimal, decimal or the name of a symbol in
+the ELF) and `--stack-buffer <BYTES>`; with `--stack-buffer 1048576`
+`huffbench` runs and verifies too. An unknown symbol name silently keeps
+the default base, and a base inside the image is still the assertion
+panic. Two Embench benchmarks did not fit at `6fc6ac9`:
 
 * `huffbench`: `compdecomp` has about 5 KiB of local arrays; the simulator
   panics at start-up with `TODO: Reserve inadequate buffer`
@@ -500,17 +504,33 @@ functions with 6 KB and 20 KB local arrays, also nested, run fine, since a
 frame's own (base) reservation only takes the part of the pool it is
 missing.
 
-## Simulator: event recording (scryer `8e73d4a`)
+## Simulator: event recording (scryer `8e73d4a`, `eb7d2b5`)
 
 `8e73d4a` replaces the metrics (`InstructionReads`, ...) by an event log
-that `--print-events` prints after the run: every instruction with its
-address and disassembly, every operand produced or forwarded with its type,
-stack and memory events. This is the trace that was missing when the
-wrong-result issues above had to be isolated by black-box experiments. The
-log is kept in memory whether or not it is printed: a 40-million-instruction
-run takes 6.5 GB and twice the time of `6fc6ac9` (61 s against 30 s), the
-Embench benchmarks need 2 to 6 GB each, and nothing cheaper reports an
-instruction count any more. After an error the whole log is printed; after
+that `--print-events` prints: every instruction with its address and
+disassembly, every operand produced or forwarded with its type, stack and
+memory events. This is the trace that was missing when the wrong-result
+issues above had to be isolated by black-box experiments. Since `8d53ed1`
+it can go to a file (`--print-events=FILE`) and is flushed every
+`--print-events-buffered` steps (default 1), which keeps memory flat; the
+file costs about 93 bytes per instruction, 3.8 GB for a 40-million-
+instruction loop. Measured on the same machine in one session:
+
+| run of a 40.5-million-instruction loop | time | peak memory |
+|---|---|---|
+| `6fc6ac9` | 33 s | 10 MB |
+| `8e73d4a`, events not printed | 107 s | 6.5 GB |
+| `eb7d2b5`, events not printed | 77 s | 6.5 GB |
+| `eb7d2b5`, `--print-events=/dev/null` | 133 s | 10 MB |
+| `eb7d2b5`, same with `--print-events-buffered 1000` | 127 s | 10 MB |
+
+Still open: a run that does not print events records them all the same
+(the 6.5 GB above; the Embench benchmarks need 2 to 6 GB each), nothing
+cheap reports an instruction count, and `--timeout-type instructions`
+counts the *stored* events, so with streaming the count is reset every
+flush and the timeout never fires (a 1000-instruction timeout stops the
+loop at once without `--print-events` and not at all with
+`--print-events=/dev/null`). After an error the stored log is printed; after
 a panic (the `.bss` read, the stack pool) nothing is.
 
 ## Compile time: Embench data points

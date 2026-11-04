@@ -29,7 +29,7 @@ cap each step.
 
 ## Results
 
-With rust-wasmtime `f9fa226`, scryer `8e73d4a` and wild `2b9f2b4`:
+With rust-wasmtime `f9fa226`, scryer `eb7d2b5` and wild `2b9f2b4`:
 
 | benchmark | result | notes |
 |-----------|--------|-------|
@@ -48,7 +48,7 @@ With rust-wasmtime `f9fa226`, scryer `8e73d4a` and wild `2b9f2b4`:
 | xgboost | pass | 35.0 M |
 | nsichneu | pass | 16.7 M; needed the stack moved up before scryer `8059eee` (its image is 68 KiB) |
 | picojpeg | pass | 15.4 M; needed the stack moved up before scryer `8059eee` (73 KiB image), and was stopped by backend issues 12 and 13 before `f9fa226` |
-| huffbench | simulator limit | passes with a bigger stack pool (25.0 M); one of its reservations exhausts scryer's 4 KiB pool |
+| huffbench | pass with `--sim-args="--stack-buffer 1048576"` | 25.0 M; one of its reservations exhausts scryer's default 4 KiB stack pool |
 | aha-mont64 | backend bug | [issue 14](../../docs/backend-issues/README.md): the inlined loop does not compile in 30 minutes; passes with `--cflags=-fno-inline-functions` (67.3 M, compiles in 0.5 s) |
 | nettle-sha256 | compile time | one 837-instruction block (the rounds are unrolled by hand, so no flag helps: the block is the same size at `-O1` and `-Oz`); see below |
 | wikisort | unsupported | calls `sqrt` on a `double`; no floating point on Scry |
@@ -56,16 +56,20 @@ With rust-wasmtime `f9fa226`, scryer `8e73d4a` and wild `2b9f2b4`:
 Instruction counts are the `InstructionReads` metric of scryer `6fc6ac9`
 for one iteration (`GLOBAL_SCALE_FACTOR=1`, including one warm-up run);
 they vary slightly between backend revisions and compiles, since code
-generation is not deterministic. scryer `8e73d4a` prints no metrics, so the
-runner's `instr` column is 0 with it, and it keeps every event of a run in
-memory (about 160 bytes per instruction, 2 to 6 GB per benchmark here), so
-use `--jobs 1` unless the machine has memory to spare.
+generation is not deterministic. scryer `8e73d4a` and later print no metrics,
+so the runner's `instr` column is 0 with them, and they keep every event of
+a run in memory unless the events are printed (about 160 bytes per
+instruction, 2 to 6 GB per benchmark here), so use `--jobs 1` unless the
+machine has memory to spare, or pass `--sim-args=--print-events=/dev/null`
+to keep memory flat at the cost of speed. `--sim-args` passes any other
+simulator options through, such as `--stack-buffer`.
 
-**Simulator limits.** scryer places the stack at a fixed address
-(`0x100000` since `8059eee`, `0x10000` before) with a 4 KiB pool for stack
-growth (`stack_base` and `stack_buffer` in its `src/lib.rs`), and a program
-image must fit below the stack. Raising the pool to `1 << 20` lets huffbench
-run and verify; nothing in the generated code depends on the stack address.
+**Simulator limits.** scryer places the stack at `0x100000` by default
+(`0x10000` before `8059eee`) with a 4 KiB pool for stack growth, and a
+program image must fit below the stack. Since `eb7d2b5` both are options,
+`--stack-base` and `--stack-buffer`; huffbench runs and verifies with the
+pool at 1 MiB, which `--sim-args` passes through. Nothing in the generated
+code depends on the stack address.
 
 **Compile time.** The backend's compile time grows cubically with the size
 of a basic block (see the open issue in `docs/backend-issues`), and the two

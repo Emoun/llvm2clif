@@ -238,12 +238,14 @@ simulator's `-i` inputs.
 ### Simulator limits
 
 `scryer` maps the program at address 0 and places the stack at address
-0x100000 (1 MiB; 64 KiB before scryer `8059eee`) with a 4 KiB pool for
-stack growth, so a program image (code + data) must stay below 1 MiB, and a
-program whose stack reservations exhaust the pool stops with a panic. The
-simulator records every event of a run in memory (about 160 bytes per
-simulated instruction) and so needs several GB for runs of tens of millions
-of instructions.
+0x100000 by default (`--stack-base`), with a 4 KiB pool for stack growth
+(`--stack-buffer`, in bytes), so a program image (code + data) must stay
+below the stack base, and a program whose stack reservations exhaust the
+pool stops with a panic unless the pool is enlarged. A run that does not
+print its events (`--print-events`, optionally `=FILE`) still records them
+in memory, about 160 bytes per simulated instruction, so runs of tens of
+millions of instructions need several GB; `--print-events=/dev/null` keeps
+memory flat at the cost of speed.
 
 ## Known issues in the Scry backend and simulator
 
@@ -260,8 +262,8 @@ converge). Open there: a compile-time explosion on nested loops (a
 stops `aha-mont64`), code generation that is not deterministic (the same
 input compiles to different objects, which so far only matters for
 reproducibility), and compile time that grows cubically with the size of a
-basic block (a thousand-instruction block takes well over a minute). The
-simulator's fixed 4 KiB stack pool stops one more benchmark. `llvm2clif` keeps one workaround: explicit zero bytes instead
+basic block (a thousand-instruction block takes well over a minute). One more
+benchmark needs the simulator's stack pool enlarged (`--stack-buffer`). `llvm2clif` keeps one workaround: explicit zero bytes instead
 of `.bss`, which the simulator does not zero-fill.
 
 ## Tests
