@@ -29,7 +29,7 @@ cap each step.
 
 ## Results
 
-With rust-wasmtime `f9fa226`, scryer `ad541e0` and wild `2b9f2b4`:
+With rust-wasmtime `f9fa226`, scryer `01216f0` and wild `2b9f2b4`:
 
 | benchmark | result | notes |
 |-----------|--------|-------|

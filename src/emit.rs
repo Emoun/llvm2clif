@@ -449,10 +449,9 @@ pub fn object_file(m: &ClifModule, module_name: &str) -> anyhow::Result<Vec<u8>>
         let Some(init) = &d.init else { continue };
         let mut desc = DataDescription::new();
         match init {
-            // Zero-initialized data is emitted as explicit zero bytes rather
-            // than as `.bss`: the scryer simulator treats the file-less part
-            // of a segment as uninitialized memory and faults when it is read.
-            DataInit::Zero(n) => desc.define(vec![0u8; *n as usize].into_boxed_slice()),
+            // Zero-initialized data goes to `.bss` (scryer zero-fills it
+            // since commit 01216f0; earlier versions faulted on reading it).
+            DataInit::Zero(n) => desc.define_zeroinit(*n as usize),
             DataInit::Bytes(b) => desc.define(b.clone().into_boxed_slice()),
         }
         desc.set_align(d.align);

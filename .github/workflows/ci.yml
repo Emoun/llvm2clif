@@ -77,7 +77,7 @@ jobs:
       - name: Install the Scry simulator and linker
         shell: bash
         run: |
-          cargo install --locked --git https://github.com/Scry-arch/scryer.git --rev ad541e078eb443a233820a7272fc2fc19177be4c scryer
+          cargo install --locked --git https://github.com/Scry-arch/scryer.git --rev 01216f000711d2e1e7a5741407c934a6418486d7 scryer
           cargo install --locked --git https://github.com/Scry-arch/scry-wild.git --rev 2b9f2b4d754428f3a8c0f5b76ff762fd9615a7ad --bin wild wild-linker
       - name: Check the tools
         shell: bash

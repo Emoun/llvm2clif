@@ -3,7 +3,7 @@
 While developing llvm2clif, several problems surfaced in the Scry Cranelift
 backend ([Scry-arch/rust-wasmtime](https://github.com/Scry-arch/rust-wasmtime))
 and the simulator ([Scry-arch/scryer](https://github.com/Scry-arch/scryer),
-commit `ad541e0` with scry_sim `8269ecf`; the issues were found on `6fc6ac9`). They are outside this repository, but they determine which
+commit `01216f0`; the issues were found on `6fc6ac9`). They are outside this repository, but they determine which
 programs run correctly end to end, so they are documented here together with
 minimal reproducers. The reproducer `.clif` files can be compiled directly:
 
@@ -25,7 +25,7 @@ and `fad5e62`):
 |-------|---------------------|
 | 1. `echo.l` forwards every queued operand | fixed in `faad34b` |
 | 2. type-tag conflicts on block parameters | fixed in `faad34b` |
-| 3. `.bss` loaded as uninitialized memory | fixed in scry_sim `8269ecf` (scryer `bf21338`); still worked around, see below |
+| 3. `.bss` loaded as uninitialized memory | fixed in scryer `01216f0` (scry_sim `8269ecf`); llvm2clif emits `.bss` again |
 | 4. no 64-bit values | unchanged, lowered by the translator |
 | 5. infinite loop on a reference distance over 1023 | fixed in `21187c1` |
 | 6. nondeterministic code generation | open |
@@ -41,7 +41,6 @@ and `fad5e62`):
 | simulator: 4 KiB stack pool | configurable since scryer `459c71b` (`--stack-buffer`) |
 | simulator: 64 KiB image | fixed in scryer `8059eee` (1 MiB, `--stack-base` since `459c71b`) |
 | simulator: event recording cost | streaming since `da24f0a`; still recorded when not printed |
-| simulator: head `bf21338` does not build | open: `src/cli.rs` and `src/elf.rs` were never committed |
 
 Issues 11 to 14 and the simulator limits were found by running
 [Embench-IoT](../../benchmarks/embench/README.md) on the toolchain.
@@ -109,16 +108,15 @@ the conflicts (the remaining tag problems are issues 7 to 9).
 
 ## 3. `.bss` is loaded as uninitialized memory (simulator)
 
-**Fixed in scry_sim `8269ecf`** (`add_block_zeroed` now marks the memory
-initialized), which scryer picks up in `bf21338`: a build of llvm2clif that
-emits a real `.bss` (one line in `src/emit.rs`, `define_zeroinit` instead
-of explicit zeros) runs `bss_uninitialized.c` and returns 5. Until then the
+**Fixed in scryer `01216f0`** (scry_sim `8269ecf`: `add_block_zeroed` now
+marks the memory initialized): `bss_uninitialized.c`, built by the current
+llvm2clif, which emits a real `.bss` again, returns 5. Until then the
 loader created every `PT_LOAD` segment's memory zeroed but marked it
 uninitialized, and a load from the NOBITS tail (`p_memsz` beyond
-`p_filesz`) panicked in `perform_load` with `not yet implemented`.
-llvm2clif keeps emitting explicit zeros for now, because `bf21338` does not
-build from a clean clone (see the simulator notes below) and the CI installs
-the last commit that does, `ad541e0`, whose lockfile still has the old core.
+`p_filesz`) panicked in `perform_load` with `not yet implemented`;
+llvm2clif emitted explicit zero bytes instead of `.bss` to avoid it. With
+an older simulator the test programs now fault on their first read of a
+zero-initialized global.
 
 **Reproducer:** `bss_uninitialized.c`.
 
@@ -509,7 +507,7 @@ functions with 6 KB and 20 KB local arrays, also nested, run fine, since a
 frame's own (base) reservation only takes the part of the pool it is
 missing.
 
-## Simulator: event recording (scryer `8e73d4a` to `ad541e0`)
+## Simulator: event recording (scryer `8e73d4a` to `01216f0`)
 
 `8e73d4a` replaces the metrics (`InstructionReads`, ...) by an event log
 that `--print-events` prints: every instruction with its address and
@@ -529,8 +527,8 @@ instruction loop. Measured on the same machine in one session:
 | `eb7d2b5`, `--print-events=/dev/null` | 133 s | 10 MB |
 | `eb7d2b5`, same with `--print-events-buffered 1000` | 127 s | 10 MB |
 
-At `ad541e0` with scry_sim `8269ecf` the same loop takes 36 s and 6.5 GB
-without event output and 45 s and 10 MB with `--print-events=/dev/null`,
+At `01216f0` the same loop takes 34 s and 6.5 GB without event output and
+41 s and 10 MB with `--print-events=/dev/null`,
 so streaming now costs about a quarter of the run time rather than most of
 it; `--timeout-type instructions` counts steps and fires while streaming;
 `--machine-mode` prints the events too; and the target is detected from
@@ -543,72 +541,3 @@ is printed; after a panic (the stack pool, a stack base inside the image, a
 missing or non-ELF input file) nothing is, and those panics still name no
 program address. `abort()` is still reported as `Unsupported instruction:
 Trap`.
-
-## Simulator: the head does not build (scryer `bf21338`)
-
-Commit `93bc147` ("Refactored CLI and ELF functionality into their own
-files") declares `pub mod cli;` and `mod elf;` in `src/lib.rs`, but
-`src/cli.rs` and `src/elf.rs` were never committed, so `bf21338` and
-`93bc147` fail to compile from a clean clone (`file not found for module
-\`cli\``). The history was also rewritten, so the previously pinned
-`eb7d2b5` is no longer reachable; the CI installs `ad541e0`, the last
-commit that builds. The review above used `ad541e0` with its `scry_sim`
-dependency updated to `8269ecf`.
-
-## Compile time: Embench data points
-
-The cubic compile time (above) determines which Embench benchmarks are
-practical. `aha-mont64` (`benchmark_body`: one basic block of 1006
-instructions after inlining and the 64-bit lowering) and `nettle-sha256`
-(`_nettle_sha256_compress`: a block of 837 instructions, the rounds being
-unrolled by hand in the source) did not finish compiling within two hours; the
-other benchmarks compile in 0.2 to 8.5 seconds, and `aha-mont64` compiles
-in 0.6 seconds when inlining is disabled.
-
-Block length alone does not explain `aha-mont64`: straight-line 64-bit
-code generated for the purpose (`a = a * b + i` chains, with or without a
-reused operand or a call in every step) compiles in these times,
-
-| instructions in the block | compile time |
-|---------------------------|--------------|
-| 227 | 0.25 s |
-| 451 | 1.8 s |
-| 675 | 5.8 s |
-| 899 | 14 s |
-| 1347 | 45 s |
-
-about cubic, so a 1006-instruction chain would take 20 seconds, not 30
-minutes. `montmul` from the same benchmark (311 instructions in one block)
-compiles in 0.44 seconds. What makes the inlined loop body two orders of
-magnitude slower is issue 14.
-
-## 14. Compile time explodes on nested loops with long-lived values
-
-**Reproducer:** `compile_time_nested_loops.clif` (14 blocks, 30
-instructions; not compiled within 15 minutes).
-
-The function is the skeleton of aha-mont64's `benchmark_body`: an outer
-loop around a middle loop around a chain of six self-looping blocks with
-six parameters each, a few values defined before the loops and consumed
-in the innermost block and after the middle loop, and the outer loop's
-latch (`brif v17, block13(v82), block2(v82, v16)`) testing and passing a
-*second* pair of zero constants defined in the entry block. The
-reduction was automatic (`tools/reduce_clif.py` and
-`tools/reduce_clif_blocks.py` with "compiles for more than 10 seconds" as
-the predicate), followed by ablation of the result:
-
-| change | compile time |
-|--------|--------------|
-| as is | > 900 s |
-| middle loop removed (block10 always goes to block11) | 0.16 s |
-| outer loop removed (block12 always returns) | 0.06 s |
-| self-loops removed (the chain is straight) | 0.04 s |
-| block9's or block11's arithmetic removed | 0.1 s |
-| latch uses v3 and v2 instead of v17 and v16 | 0.15 s |
-| latch uses v3 and v16, or v17 and v2 | 0.3 to 0.5 s |
-| v17 = 1 instead of 0 | > 60 s |
-
-So two extra values that are defined at the entry and live across every
-loop until the outermost latch turn a sub-second compile into one that
-does not finish, while either one alone is harmless. In `benchmark_body`
-the corresponding values are the loop bound and a counter.
