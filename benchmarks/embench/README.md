@@ -29,7 +29,7 @@ cap each step.
 
 ## Results
 
-With rust-wasmtime `f9fa226`, scryer `eb7d2b5` and wild `2b9f2b4`:
+With rust-wasmtime `f9fa226`, scryer `ad541e0` and wild `2b9f2b4`:
 
 | benchmark | result | notes |
 |-----------|--------|-------|
@@ -66,7 +66,7 @@ simulator options through, such as `--stack-buffer`.
 
 **Simulator limits.** scryer places the stack at `0x100000` by default
 (`0x10000` before `8059eee`) with a 4 KiB pool for stack growth, and a
-program image must fit below the stack. Since `eb7d2b5` both are options,
+program image must fit below the stack. Since `459c71b` both are options,
 `--stack-base` and `--stack-buffer`; huffbench runs and verifies with the
 pool at 1 MiB, which `--sim-args` passes through. Nothing in the generated
 code depends on the stack address.

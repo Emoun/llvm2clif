@@ -3,7 +3,7 @@
 While developing llvm2clif, several problems surfaced in the Scry Cranelift
 backend ([Scry-arch/rust-wasmtime](https://github.com/Scry-arch/rust-wasmtime))
 and the simulator ([Scry-arch/scryer](https://github.com/Scry-arch/scryer),
-commit `eb7d2b5`; the issues were found on `6fc6ac9`). They are outside this repository, but they determine which
+commit `ad541e0` with scry_sim `8269ecf`; the issues were found on `6fc6ac9`). They are outside this repository, but they determine which
 programs run correctly end to end, so they are documented here together with
 minimal reproducers. The reproducer `.clif` files can be compiled directly:
 
@@ -25,7 +25,7 @@ and `fad5e62`):
 |-------|---------------------|
 | 1. `echo.l` forwards every queued operand | fixed in `faad34b` |
 | 2. type-tag conflicts on block parameters | fixed in `faad34b` |
-| 3. `.bss` loaded as uninitialized memory | simulator unchanged, still worked around |
+| 3. `.bss` loaded as uninitialized memory | fixed in scry_sim `8269ecf` (scryer `bf21338`); still worked around, see below |
 | 4. no 64-bit values | unchanged, lowered by the translator |
 | 5. infinite loop on a reference distance over 1023 | fixed in `21187c1` |
 | 6. nondeterministic code generation | open |
@@ -38,9 +38,10 @@ and `fad5e62`):
 | 13. reference distance assignment does not converge | fixed in `f9fa226` |
 | 14. compile time explodes on nested loops with long-lived values | open |
 | compile time cubic in the block size | open |
-| simulator: 4 KiB stack pool | configurable since scryer `eb7d2b5` (`--stack-buffer`) |
-| simulator: 64 KiB image | fixed in scryer `8059eee` (1 MiB, `--stack-base` since `eb7d2b5`) |
-| simulator: event recording cost | partly fixed in `8d53ed1` (streaming); still recorded when not printed |
+| simulator: 4 KiB stack pool | configurable since scryer `459c71b` (`--stack-buffer`) |
+| simulator: 64 KiB image | fixed in scryer `8059eee` (1 MiB, `--stack-base` since `459c71b`) |
+| simulator: event recording cost | streaming since `da24f0a`; still recorded when not printed |
+| simulator: head `bf21338` does not build | open: `src/cli.rs` and `src/elf.rs` were never committed |
 
 Issues 11 to 14 and the simulator limits were found by running
 [Embench-IoT](../../benchmarks/embench/README.md) on the toolchain.
@@ -108,13 +109,16 @@ the conflicts (the remaining tag problems are issues 7 to 9).
 
 ## 3. `.bss` is loaded as uninitialized memory (simulator)
 
-**Still open at scryer `8e73d4a`.** The loader creates every `PT_LOAD`
-segment's memory zeroed but marks it uninitialized, writes the file bytes
-over it, and a load from the NOBITS tail (`p_memsz` beyond `p_filesz`)
-panics in `scry_sim`'s `perform_load` with `not yet implemented`
-(`execution.rs:573`); `6fc6ac9` did the same. A build of llvm2clif that
+**Fixed in scry_sim `8269ecf`** (`add_block_zeroed` now marks the memory
+initialized), which scryer picks up in `bf21338`: a build of llvm2clif that
 emits a real `.bss` (one line in `src/emit.rs`, `define_zeroinit` instead
-of explicit zeros) reproduces it with `bss_uninitialized.c`.
+of explicit zeros) runs `bss_uninitialized.c` and returns 5. Until then the
+loader created every `PT_LOAD` segment's memory zeroed but marked it
+uninitialized, and a load from the NOBITS tail (`p_memsz` beyond
+`p_filesz`) panicked in `perform_load` with `not yet implemented`.
+llvm2clif keeps emitting explicit zeros for now, because `bf21338` does not
+build from a clean clone (see the simulator notes below) and the CI installs
+the last commit that does, `ad541e0`, whose lockfile still has the old core.
 
 **Reproducer:** `bss_uninitialized.c`.
 
@@ -482,12 +486,13 @@ are constants defined in that block.
 growth (`stack_base = 1 << 16; stack_buffer = 1 << 12` in `src/lib.rs`),
 and stack reservations are powers of two. Since scryer `8059eee` the stack
 is at 1 MiB, so images up to 1 MiB load and `nsichneu` and `picojpeg` run
-on the stock simulator, and since `eb7d2b5` both numbers are options:
+on the stock simulator, and since `459c71b` both numbers are options:
 `--stack-base <ADDRESS>` (hexadecimal, decimal or the name of a symbol in
 the ELF) and `--stack-buffer <BYTES>`; with `--stack-buffer 1048576`
-`huffbench` runs and verifies too. An unknown symbol name silently keeps
-the default base, and a base inside the image is still the assertion
-panic. Two Embench benchmarks did not fit at `6fc6ac9`:
+`huffbench` runs and verifies too. An unknown symbol name is an error since
+`6303236`, though the message says `Invalid Target: Unable to determine
+target` rather than naming the label; a base inside the image is still the
+assertion panic. Two Embench benchmarks did not fit at `6fc6ac9`:
 
 * `huffbench`: `compdecomp` has about 5 KiB of local arrays; the simulator
   panics at start-up with `TODO: Reserve inadequate buffer`
@@ -504,7 +509,7 @@ functions with 6 KB and 20 KB local arrays, also nested, run fine, since a
 frame's own (base) reservation only takes the part of the pool it is
 missing.
 
-## Simulator: event recording (scryer `8e73d4a`, `eb7d2b5`)
+## Simulator: event recording (scryer `8e73d4a` to `ad541e0`)
 
 `8e73d4a` replaces the metrics (`InstructionReads`, ...) by an event log
 that `--print-events` prints: every instruction with its address and
@@ -524,14 +529,31 @@ instruction loop. Measured on the same machine in one session:
 | `eb7d2b5`, `--print-events=/dev/null` | 133 s | 10 MB |
 | `eb7d2b5`, same with `--print-events-buffered 1000` | 127 s | 10 MB |
 
+At `ad541e0` with scry_sim `8269ecf` the same loop takes 36 s and 6.5 GB
+without event output and 45 s and 10 MB with `--print-events=/dev/null`,
+so streaming now costs about a quarter of the run time rather than most of
+it; `--timeout-type instructions` counts steps and fires while streaming;
+`--machine-mode` prints the events too; and the target is detected from
+the file (`--target` is optional, `-t` for short).
+
 Still open: a run that does not print events records them all the same
-(the 6.5 GB above; the Embench benchmarks need 2 to 6 GB each), nothing
-cheap reports an instruction count, and `--timeout-type instructions`
-counts the *stored* events, so with streaming the count is reset every
-flush and the timeout never fires (a 1000-instruction timeout stops the
-loop at once without `--print-events` and not at all with
-`--print-events=/dev/null`). After an error the stored log is printed; after
-a panic (the `.bss` read, the stack pool) nothing is.
+(the 6.5 GB above; the Embench benchmarks need 2 to 6 GB each), and
+nothing cheap reports an instruction count. After an error the stored log
+is printed; after a panic (the stack pool, a stack base inside the image, a
+missing or non-ELF input file) nothing is, and those panics still name no
+program address. `abort()` is still reported as `Unsupported instruction:
+Trap`.
+
+## Simulator: the head does not build (scryer `bf21338`)
+
+Commit `93bc147` ("Refactored CLI and ELF functionality into their own
+files") declares `pub mod cli;` and `mod elf;` in `src/lib.rs`, but
+`src/cli.rs` and `src/elf.rs` were never committed, so `bf21338` and
+`93bc147` fail to compile from a clean clone (`file not found for module
+\`cli\``). The history was also rewritten, so the previously pinned
+`eb7d2b5` is no longer reachable; the CI installs `ad541e0`, the last
+commit that builds. The review above used `ad541e0` with its `scry_sim`
+dependency updated to `8269ecf`.
 
 ## Compile time: Embench data points
 

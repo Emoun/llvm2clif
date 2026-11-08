@@ -245,7 +245,8 @@ pool stops with a panic unless the pool is enlarged. A run that does not
 print its events (`--print-events`, optionally `=FILE`) still records them
 in memory, about 160 bytes per simulated instruction, so runs of tens of
 millions of instructions need several GB; `--print-events=/dev/null` keeps
-memory flat at the cost of speed.
+memory flat for about a quarter more run time. Since scryer `ad541e0` the
+target is detected from the file, so `--target` can be left out.
 
 ## Known issues in the Scry backend and simulator
 
@@ -264,7 +265,9 @@ input compiles to different objects, which so far only matters for
 reproducibility), and compile time that grows cubically with the size of a
 basic block (a thousand-instruction block takes well over a minute). One more
 benchmark needs the simulator's stack pool enlarged (`--stack-buffer`). `llvm2clif` keeps one workaround: explicit zero bytes instead
-of `.bss`, which the simulator does not zero-fill.
+of `.bss`. The simulator core zero-fills `.bss` since scry_sim `8269ecf`,
+but the scryer commit that picks it up does not build from a clean clone
+yet, so the workaround stays until a buildable scryer has the fix.
 
 ## Tests
 
