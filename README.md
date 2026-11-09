@@ -241,14 +241,11 @@ simulator's `-i` inputs.
 0x100000 by default (`--stack-base`), with a 4 KiB pool for stack growth
 (`--stack-buffer`, in bytes), so a program image (code + data) must stay
 below the stack base, and a program whose stack reservations exhaust the
-pool stops with a panic unless the pool is enlarged. A run that does not
-print its events (`--print-events`, optionally `=FILE`) still records them
-in memory, about 160 bytes per simulated instruction, so runs of tens of
-millions of instructions need several GB; `--print-events=/dev/null` keeps
-memory flat for about a quarter more run time. Since scryer `ad541e0` the
-target is detected from the file, so `--target` can be left out. Use
-scryer `01216f0` or later: it zero-fills `.bss`, which the programs rely
-on.
+pool stops with a panic unless the pool is enlarged. `--print-events`
+(optionally `=FILE`) prints a trace of every step. Since scryer `ad541e0`
+the target is detected from the file, so `--target` can be left out. Use
+scryer `b1737e6` or later: it zero-fills `.bss`, which the programs rely
+on, and runs in constant memory when it does not print events.
 
 ## Known issues in the Scry backend and simulator
 
@@ -266,7 +263,8 @@ stops `aha-mont64`), code generation that is not deterministic (the same
 input compiles to different objects, which so far only matters for
 reproducibility), and compile time that grows cubically with the size of a
 basic block (a thousand-instruction block takes well over a minute). One more
-benchmark needs the simulator's stack pool enlarged (`--stack-buffer`). Zero-initialized globals go to `.bss`, which the simulator zero-fills
+benchmark needs the simulator's stack pool enlarged (`--stack-buffer`,
+which the benchmark runner passes by default). Zero-initialized globals go to `.bss`, which the simulator zero-fills
 since scryer `01216f0`; older simulators fault when such a variable is
 read, so use that version or later.
 

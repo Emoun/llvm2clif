@@ -3,7 +3,7 @@
 While developing llvm2clif, several problems surfaced in the Scry Cranelift
 backend ([Scry-arch/rust-wasmtime](https://github.com/Scry-arch/rust-wasmtime))
 and the simulator ([Scry-arch/scryer](https://github.com/Scry-arch/scryer),
-commit `01216f0`; the issues were found on `6fc6ac9`). They are outside this repository, but they determine which
+commit `b1737e6`; the issues were found on `6fc6ac9`). They are outside this repository, but they determine which
 programs run correctly end to end, so they are documented here together with
 minimal reproducers. The reproducer `.clif` files can be compiled directly:
 
@@ -40,7 +40,7 @@ and `fad5e62`):
 | compile time cubic in the block size | open |
 | simulator: 4 KiB stack pool | configurable since scryer `459c71b` (`--stack-buffer`) |
 | simulator: 64 KiB image | fixed in scryer `8059eee` (1 MiB, `--stack-base` since `459c71b`) |
-| simulator: event recording cost | streaming since `da24f0a`; still recorded when not printed |
+| simulator: event recording cost | fixed: streaming since `da24f0a`, nothing recorded when not printed since `b1737e6` |
 
 Issues 11 to 14 and the simulator limits were found by running
 [Embench-IoT](../../benchmarks/embench/README.md) on the toolchain.
@@ -507,7 +507,7 @@ functions with 6 KB and 20 KB local arrays, also nested, run fine, since a
 frame's own (base) reservation only takes the part of the pool it is
 missing.
 
-## Simulator: event recording (scryer `8e73d4a` to `01216f0`)
+## Simulator: event recording (scryer `8e73d4a` to `b1737e6`)
 
 `8e73d4a` replaces the metrics (`InstructionReads`, ...) by an event log
 that `--print-events` prints: every instruction with its address and
@@ -534,10 +534,14 @@ it; `--timeout-type instructions` counts steps and fires while streaming;
 `--machine-mode` prints the events too; and the target is detected from
 the file (`--target` is optional, `-t` for short).
 
-Still open: a run that does not print events records them all the same
-(the 6.5 GB above; the Embench benchmarks need 2 to 6 GB each), and
-nothing cheap reports an instruction count. After an error the stored log
-is printed; after a panic (the stack pool, a stack base inside the image, a
-missing or non-ELF input file) nothing is, and those panics still name no
-program address. `abort()` is still reported as `Unsupported instruction:
-Trap`.
+Since `b1737e6` nothing is recorded unless events are printed: the loop
+takes 28 s and 10 MB without event output (44 s streamed), so the memory
+cost is gone and the Embench benchmarks run several at a time again.
+
+Still open, and worked around on this side: nothing reports an instruction
+count (the benchmark runner no longer shows one); the stack pool, a stack
+base inside the image and a missing or non-ELF input file are panics that
+name no program address (the end-to-end harness reports the panic line);
+`abort()` is reported as `Unsupported instruction: Trap` (the harness
+treats any simulator error as a failed case). After an error the printed
+log, if any, precedes the error banner.
