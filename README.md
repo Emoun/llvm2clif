@@ -288,8 +288,10 @@ the same programs through the whole toolchain on the simulator; set
 `benchmarks/embench/run_embench.py` builds the
 [Embench-IoT](https://github.com/embench/embench-iot) suite with `scry-cc`
 and runs it on the simulator; `benchmarks/embench/README.md` lists what
-passes and what stops each of the others (a backend bug, a simulator limit,
-compile time, or floating point).
+passes and what stops each of the others (a backend bug, compile time, or
+floating point), and has static and dynamic instruction metrics of the
+executables (`metrics.py`, built on `tools/scrymetrics`) and a code-size
+comparison with RISC-V builds of the same sources (`codesize_rv32.sh`).
 
 ## Why a hand-written LLVM IR parser?
 
@@ -325,7 +327,7 @@ src/main.rs      llvm2clif command line
 src/bin/         scry-cc command line
 runtime/         the bundled C runtime library and its headers
 tests/           test programs and harnesses
-benchmarks/      the Embench-IoT runner and board support
-tools/           split_clif.py and reduce_clif.py, for cutting down backend reproducers
+benchmarks/      the Embench-IoT runner, board support, metrics and code-size scripts
+tools/           split_clif.py and reduce_clif.py (cutting down backend reproducers), scrymetrics (instruction metrics)
 docs/            backend issue reproducers
 ```

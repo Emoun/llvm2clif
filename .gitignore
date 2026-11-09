@@ -8,3 +8,5 @@
 # The Embench checkout and results of benchmarks/embench/run_embench.py
 /benchmarks/embench/embench-iot/
 /benchmarks/embench/out/
+# Build output of the metrics tool
+/tools/scrymetrics/target/

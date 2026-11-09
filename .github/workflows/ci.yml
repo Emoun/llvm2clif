@@ -25,11 +25,17 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - name: Format check
-        run: cargo fmt --all -- --check
+        run: |
+          cargo fmt --all -- --check
+          cargo fmt --all --manifest-path tools/scrymetrics/Cargo.toml -- --check
       - name: Clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: |
+          cargo clippy --all-targets -- -D warnings
+          cargo clippy --all-targets --manifest-path tools/scrymetrics/Cargo.toml -- -D warnings
       - name: Build
-        run: cargo build --release
+        run: |
+          cargo build --release
+          cargo build --release --manifest-path tools/scrymetrics/Cargo.toml
       - name: Unit and interpreter tests
         run: cargo test --release
 

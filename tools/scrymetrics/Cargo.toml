@@ -1,0 +1,12 @@
+[package]
+name = "scrymetrics"
+version = "0.1.0"
+edition = "2021"
+description = "Static and dynamic instruction metrics for Scry programs (ELF code and scryer event traces)"
+publish = false
+
+[workspace]
+
+[dependencies]
+object = "0.36"
+scry_isa = { git = "https://github.com/scry-arch/scry_isa.git", rev = "aba992b7621a905a320d099cac8ada3c06cf02e3" }
