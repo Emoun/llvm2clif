@@ -105,8 +105,8 @@ fn run_static(path: &str) -> Result<String, String> {
     let mut by_category: BTreeMap<String, u64> = BTreeMap::new();
     let mut forms: BTreeMap<String, u64> = BTreeMap::new();
     let mut invalid = 0u64;
-    for w in bytes.chunks_exact(2) {
-        let inst = scry_isa::Instruction::decode(u16::from_le_bytes([w[0], w[1]]));
+    for w in bytes.as_chunks::<2>().0 {
+        let inst = scry_isa::Instruction::decode(u16::from_le_bytes(*w));
         use scry_isa::Instruction as I;
         let form = match &inst {
             I::Invalid(_) => {
