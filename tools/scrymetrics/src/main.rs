@@ -6,7 +6,14 @@
 //! `scrymetrics dynamic` reads a scryer event trace (`scryer prog.elf
 //! --print-events`) from standard input and reports the dynamic instruction
 //! mix, operand and control-flow lifetimes, queue occupancy, memory traffic
-//! and stack use. Both print one JSON object.
+//! and stack use.
+//!
+//! `scrymetrics rv32-static <elf>` and `scrymetrics rv32` do the same for
+//! RISC-V (RV32IMC) programs, the dynamic pass from a qemu execution log
+//! (`qemu-riscv32 -d exec,in_asm,nochain prog.elf`) on standard input, for
+//! comparison. All print one JSON object.
+
+mod rv32;
 
 use object::{Object, ObjectSection};
 use std::collections::{BTreeMap, HashMap};
@@ -441,8 +448,43 @@ fn main() {
             }
             let _ = writeln!(out, "{}", d.json());
         }
+        Some("rv32-static") => {
+            for path in &args[1..] {
+                match rv32::run_static(path) {
+                    Ok(json) => {
+                        let _ = writeln!(out, "{json}");
+                    }
+                    Err(e) => {
+                        eprintln!("scrymetrics: {e}");
+                        std::process::exit(1);
+                    }
+                }
+            }
+        }
+        Some("rv32") => {
+            let stdin = io::stdin();
+            let mut reader = io::BufReader::with_capacity(1 << 20, stdin.lock());
+            let mut r = rv32::Rv32::new();
+            let mut line = String::new();
+            loop {
+                line.clear();
+                match reader.read_line(&mut line) {
+                    Ok(0) => break,
+                    Ok(_) => r.line(&line),
+                    Err(e) => {
+                        eprintln!("scrymetrics: {e}");
+                        std::process::exit(1);
+                    }
+                }
+            }
+            r.finish();
+            let _ = writeln!(out, "{}", r.json());
+        }
         _ => {
-            eprintln!("usage: scrymetrics static <elf>...  |  scryer prog.elf --print-events | scrymetrics dynamic");
+            eprintln!("usage: scrymetrics static <elf>...");
+            eprintln!("       scryer prog.elf --print-events | scrymetrics dynamic");
+            eprintln!("       scrymetrics rv32-static <elf>...");
+            eprintln!("       qemu-riscv32 -d exec,in_asm,nochain prog.elf 2>&1 >/dev/null | scrymetrics rv32");
             std::process::exit(2);
         }
     }

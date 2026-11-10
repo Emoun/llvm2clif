@@ -1,11 +1,14 @@
 # scrymetrics
 
-Static and dynamic instruction metrics for Scry programs.
+Static and dynamic instruction metrics for Scry programs, and the same for
+RISC-V (RV32IMC) programs run on qemu, for comparison.
 
 ```sh
 cargo build --release --manifest-path tools/scrymetrics/Cargo.toml
 tools/scrymetrics/target/release/scrymetrics static prog.elf
 scryer prog.elf --print-events | tools/scrymetrics/target/release/scrymetrics dynamic
+tools/scrymetrics/target/release/scrymetrics rv32-static prog-rv32.elf
+qemu-riscv32 -d exec,in_asm,nochain prog-rv32.elf 2>&1 >/dev/null | tools/scrymetrics/target/release/scrymetrics rv32
 ```
 
 `static` decodes the `.text` section (every Scry instruction is 16 bits) and
@@ -32,7 +35,28 @@ storing it, and reports:
   running to the end (then `returned` is empty and the counts cover the
   instructions executed up to the limit).
 
-Both commands print one JSON object; `benchmarks/embench/metrics.py` runs
+`rv32-static` decodes the `.text*` sections of a RISC-V ELF file (16- and
+32-bit encodings) and counts the instructions by mnemonic, category and
+size. `rv32` reads the log of `qemu-riscv32 -d exec,in_asm,nochain`: the
+`in_asm` blocks give the instructions of every translated block, the
+`Trace` lines the order in which the blocks ran (`nochain` makes qemu report
+each one), and nothing but the encodings is used. It reports the dynamic
+mix, the lifetime of register values (from the instruction that writes a
+register to the last one that reads it before it is overwritten; a value
+that is never read counts as discarded), the number of live register values
+after each instruction, branch and call counts, block lengths, loads and
+stores (with those addressed from `sp` apart) and the stack depth, which it
+follows through the constant adjustments of `sp` (`"known": false` when an
+instruction set `sp` from another register, as a variable-length array
+does).
+
+The RISC-V categories are `alu`, `constant` (`lui`, `auipc`, `li`), `move`
+(`mv`), `control`, `memory`, `nop`, `system` (`ecall`, `fence`, CSR
+accesses) and `other`; `li` and `mv` are the `addi` forms with `x0` as the
+source or 0 as the immediate, so the constant and move categories can be
+set against Scry's constant and dataflow instructions.
+
+All commands print one JSON object; `benchmarks/embench/metrics.py` runs
 them over the Embench executables and prints Markdown tables.
 
 The categories are: `alu` (`add sub mul div and or xor sh eq lt gt isnar

@@ -290,8 +290,9 @@ the same programs through the whole toolchain on the simulator; set
 and runs it on the simulator; `benchmarks/embench/README.md` lists what
 passes and what stops each of the others (a backend bug, compile time, or
 floating point), and has static and dynamic instruction metrics of the
-executables (`metrics.py`, built on `tools/scrymetrics`) and a code-size
-comparison with RISC-V builds of the same sources (`codesize_rv32.sh`).
+executables (`metrics.py`, built on `tools/scrymetrics`) side by side with
+the same metrics for rv32imc builds of the same optimized IR run on
+qemu (`metrics.py --rv32`).
 
 ## Why a hand-written LLVM IR parser?
 

@@ -10,3 +10,5 @@
 /benchmarks/embench/out/
 # Build output of the metrics tool
 /tools/scrymetrics/target/
+# Python caches
+__pycache__/
