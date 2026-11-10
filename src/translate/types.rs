@@ -1,34 +1,69 @@
-//! Mapping of LLVM types onto Cranelift types for the Scry target.
+//! Mapping of LLVM types onto Cranelift types.
 //!
-//! Scry (as supported by the Cranelift backend) has 8-, 16- and 32-bit
-//! integers and 32-bit pointers; the backend has no 64-bit support yet. Every
-//! LLVM first-class value is represented as a flat list of Cranelift values:
+//! The translation works in units of the target's *word*: 32 bits for Scry
+//! (whose Cranelift backend has no 64-bit support yet), 64 bits for riscv64.
+//! The target has 8-, 16- and 32-bit integers, 64-bit ones when the word is
+//! 64 bits, and word-sized pointers. Every LLVM first-class value is
+//! represented as a flat list of Cranelift values:
 //!
-//! * `iN` with `N <= 32` maps to the smallest of `i8`/`i16`/`i32` that holds
-//!   it. Widths other than 8, 16 and 32 are kept *zero-extended* inside the
-//!   container ("canonical form"), so unsigned operations work unchanged and
-//!   signed operations sign-extend on demand.
-//! * `iN` with `32 < N <= 128` ("wide" integers) becomes `ceil(N / 32)`
-//!   values: 32-bit parts, least significant first, the last one holding the
-//!   remaining bits as a canonical value of its own container (so `i64` is
-//!   two `i32`s). Arithmetic on them is expanded into 32-bit operations by
-//!   the `wide` module. (`opt` produces `i65` for overflow-free loop trip
-//!   counts of 64-bit loops, so 64 bits alone would not be enough.)
-//! * `ptr` maps to `i32`.
+//! * `iN` with `N <= word` maps to the smallest of `i8`/`i16`/`i32`/`i64`
+//!   that holds it. Widths other than 8, 16, 32 (and 64) are kept
+//!   *zero-extended* inside the container ("canonical form"), so unsigned
+//!   operations work unchanged and signed operations sign-extend on demand.
+//! * `iN` with `word < N <= 128` ("wide" integers) becomes `ceil(N / word)`
+//!   values: word-sized parts, least significant first, the last one holding
+//!   the remaining bits as a canonical value of its own container (so `i64`
+//!   is two `i32`s on Scry, and `i128` two `i64`s on riscv64). Arithmetic on
+//!   them is expanded into word-sized operations by the `wide` module.
+//!   (`opt` produces `i65` for overflow-free loop trip counts of 64-bit
+//!   loops, so 64 bits alone would not be enough on a 32-bit target.)
+//! * `ptr` maps to the word type.
 //! * Structs and arrays are flattened leaf by leaf (in memory order).
-//! * Integers wider than 64 bits, floating point and vector types are
+//! * Integers wider than 128 bits, floating point and vector types are
 //!   rejected.
+//!
+//! The word size is a process-wide setting ([`set_word_bits`]) that the
+//! translation target selects before a module is translated.
 
 use crate::llvm::{DataLayout, FuncType, Module, ParamAttrs, Type};
 use cranelift_codegen::ir::{types, AbiParam, ArgumentExtension, Signature};
 use cranelift_codegen::isa::CallConv;
+use std::sync::atomic::{AtomicU32, Ordering};
+
+static WORD_BITS: AtomicU32 = AtomicU32::new(32);
+
+/// The width in bits of the target's integer registers and pointers: 32 for
+/// Scry, 64 for riscv64.
+pub fn word_bits() -> u32 {
+    WORD_BITS.load(Ordering::Relaxed)
+}
+
+/// The Cranelift type of a word (pointers, addresses, lengths).
+pub fn word_ty() -> types::Type {
+    if word_bits() == 64 {
+        types::I64
+    } else {
+        types::I32
+    }
+}
+
+/// Selects the word size (32 or 64 bits) for every translation that follows
+/// in this process. Translations with different word sizes cannot run at the
+/// same time.
+pub fn set_word_bits(bits: u32) {
+    assert!(
+        bits == 32 || bits == 64,
+        "the word size must be 32 or 64 bits"
+    );
+    WORD_BITS.store(bits, Ordering::Relaxed);
+}
 
 /// A scalar (non-aggregate) LLVM type.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ScalarTy {
     /// An integer of the given width in bits (1..=128).
     Int(u32),
-    /// A pointer (32 bits).
+    /// A pointer (one word).
     Ptr,
 }
 
@@ -36,7 +71,7 @@ impl ScalarTy {
     pub fn bits(self) -> u32 {
         match self {
             ScalarTy::Int(b) => b,
-            ScalarTy::Ptr => 32,
+            ScalarTy::Ptr => word_bits(),
         }
     }
 
@@ -46,27 +81,28 @@ impl ScalarTy {
         container(self.bits())
     }
 
-    /// Whether the width matches its container exactly (8, 16 or 32 bits).
+    /// Whether the width matches its container exactly (8, 16, 32 or, on a
+    /// 64-bit target, 64 bits).
     pub fn is_native(self) -> bool {
         is_native(self.bits())
     }
 
-    /// Whether this is an integer wider than 32 bits, represented as
-    /// several 32-bit parts.
+    /// Whether this is an integer wider than a word, represented as several
+    /// word-sized parts.
     pub fn is_wide(self) -> bool {
-        self.bits() > 32
+        self.bits() > word_bits()
     }
 
-    /// The number of 32-bit parts representing the scalar.
+    /// The number of word-sized parts representing the scalar.
     pub fn parts(self) -> usize {
-        self.bits().div_ceil(32) as usize
+        self.bits().div_ceil(word_bits()) as usize
     }
 
     /// The scalar type of the most significant part of a wide integer (its
-    /// bits above the lower 32-bit parts).
+    /// bits above the lower word-sized parts).
     pub fn top_part(self) -> ScalarTy {
         debug_assert!(self.is_wide());
-        ScalarTy::Int(self.bits() - 32 * (self.parts() as u32 - 1))
+        ScalarTy::Int(self.bits() - word_bits() * (self.parts() as u32 - 1))
     }
 
     /// Number of bytes a load/store of this scalar accesses.
@@ -75,24 +111,28 @@ impl ScalarTy {
     }
 }
 
-/// The Cranelift container type for an integer of `bits` bits (at most 32:
-/// wider integers are split into parts before they reach Cranelift).
+/// The Cranelift container type for an integer of `bits` bits (at most a
+/// word: wider integers are split into parts before they reach Cranelift).
 pub fn container(bits: u32) -> types::Type {
     assert!(
-        bits <= 32,
-        "internal error: i{bits} has no Cranelift container (wide integers are split into 32-bit parts)"
+        bits <= word_bits(),
+        "internal error: i{bits} has no Cranelift container (integers wider than a word are split into parts)"
     );
     if bits <= 8 {
         types::I8
     } else if bits <= 16 {
         types::I16
-    } else {
+    } else if bits <= 32 {
         types::I32
+    } else {
+        types::I64
     }
 }
 
+/// Whether `bits` is the exact width of a container (8, 16, 32 or, on a
+/// 64-bit target, 64).
 pub fn is_native(bits: u32) -> bool {
-    matches!(bits, 8 | 16 | 32)
+    matches!(bits, 8 | 16 | 32) || (bits == 64 && word_bits() == 64)
 }
 
 /// A scalar leaf of a flattened type together with its byte offset within
@@ -113,18 +153,24 @@ pub struct Layout<'m> {
 
 impl<'m> Layout<'m> {
     pub fn new(module: &'m Module) -> Result<Self, String> {
+        let wb = word_bits();
         let dl = match &module.datalayout {
             Some(s) => DataLayout::parse(s).map_err(|e| e.to_string())?,
+            None if wb == 64 => {
+                DataLayout::parse("e-m:e-p:64:64-i64:64-i128:128-n32:64-S128").unwrap()
+            }
             None => DataLayout::parse("e-m:e-p:32:32-i64:64-n32-S128").unwrap(),
         };
-        if dl.ptr_bits != 32 {
+        if dl.ptr_bits != wb {
             return Err(format!(
-                "the module's data layout has {}-bit pointers; Scry needs a 32-bit target (compile with e.g. `--target=riscv32-unknown-none-elf`)",
+                "the module's data layout has {}-bit pointers, but the target has {wb}-bit ones (compile with e.g. `--target=riscv{wb}-unknown-none-elf`)",
                 dl.ptr_bits
             ));
         }
         if !dl.little_endian {
-            return Err("the module's data layout is big-endian; Scry is little-endian".into());
+            return Err(
+                "the module's data layout is big-endian; the target is little-endian".into(),
+            );
         }
         Ok(Layout { module, dl })
     }
@@ -172,12 +218,8 @@ impl<'m> Layout<'m> {
                 }
             }
             Type::Ptr(_) => Ok(ScalarTy::Ptr),
-            Type::Float(_) => Err(format!(
-                "floating point type {ty} is not supported by the Scry backend"
-            )),
-            Type::Vector { .. } => Err(format!(
-                "vector type {ty} is not supported by the Scry backend"
-            )),
+            Type::Float(_) => Err(format!("floating point type {ty} is not supported")),
+            Type::Vector { .. } => Err(format!("vector type {ty} is not supported")),
             Type::Array(..) | Type::Struct { .. } => {
                 Err(format!("expected a scalar type, found aggregate {ty}"))
             }
@@ -212,17 +254,19 @@ impl<'m> Layout<'m> {
             other => {
                 let s = self.scalar_of(other)?;
                 if s.is_wide() {
-                    // 32-bit parts, least significant first (little-endian),
-                    // the last one holding whatever bits remain.
+                    // Word-sized parts, least significant first
+                    // (little-endian), the last one holding whatever bits
+                    // remain.
                     let k = s.parts();
+                    let wb = word_bits();
                     for i in 0..k {
                         out.push(Scalar {
                             ty: if i + 1 == k {
                                 s.top_part()
                             } else {
-                                ScalarTy::Int(32)
+                                ScalarTy::Int(wb)
                             },
-                            offset: base + 4 * i as u64,
+                            offset: base + (wb / 8) as u64 * i as u64,
                             part: true,
                         });
                     }

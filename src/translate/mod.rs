@@ -20,6 +20,55 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use types::Layout;
 
+/// The machine the translated code is compiled for.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Target {
+    /// Scry, through the Scry backend of the Cranelift fork (32-bit words).
+    #[default]
+    Scry32,
+    /// RISC-V RV64IMC, through Cranelift's riscv64 backend (64-bit words);
+    /// for comparing the ISAs through the same translation.
+    Riscv64,
+}
+
+impl Target {
+    /// The width of the target's registers and pointers.
+    pub fn word_bits(self) -> u32 {
+        match self {
+            Target::Scry32 => 32,
+            Target::Riscv64 => 64,
+        }
+    }
+
+    /// The target triple Cranelift knows the ISA by.
+    pub fn triple(self) -> &'static str {
+        match self {
+            Target::Scry32 => "scry32-unknown-none-elf",
+            Target::Riscv64 => "riscv64-unknown-none-elf",
+        }
+    }
+}
+
+impl fmt::Display for Target {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Target::Scry32 => "scry32",
+            Target::Riscv64 => "riscv64",
+        })
+    }
+}
+
+/// How much Cranelift optimizes the translated functions.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum OptLevel {
+    /// No mid-end optimization: LLVM's `opt` has already optimized the
+    /// program, and the block structure reaches the backend unchanged.
+    #[default]
+    None,
+    /// Cranelift's own optimizations (`opt_level=speed`).
+    Speed,
+}
+
 /// Translation options.
 #[derive(Clone, Debug)]
 pub struct Options {
@@ -28,6 +77,10 @@ pub struct Options {
     pub skip_unsupported: bool,
     /// Run the Cranelift verifier on every translated function.
     pub verify: bool,
+    /// The machine to compile for.
+    pub target: Target,
+    /// Cranelift's optimization level.
+    pub opt_level: OptLevel,
 }
 
 impl Default for Options {
@@ -35,6 +88,8 @@ impl Default for Options {
         Options {
             skip_unsupported: false,
             verify: true,
+            target: Target::Scry32,
+            opt_level: OptLevel::None,
         }
     }
 }
@@ -92,6 +147,10 @@ pub struct ClifModule {
     pub skipped: Vec<(String, String)>,
     /// Set of symbol names that are functions (defined or external).
     pub function_names: Vec<String>,
+    /// The machine the module is compiled for.
+    pub target: Target,
+    /// Cranelift's optimization level when compiling it.
+    pub opt_level: OptLevel,
 }
 
 /// A translation failure.
@@ -173,13 +232,14 @@ pub struct ModuleCtx<'m> {
 
 impl<'m> ModuleCtx<'m> {
     pub fn new(module: &'m Module, options: Options) -> Result<Self, Diagnostic> {
+        types::set_word_bits(options.target.word_bits());
         let layout = Layout::new(module).map_err(|message| Diagnostic {
             function: None,
             line: 0,
             message,
             unsupported: true,
         })?;
-        let isa = build_isa().map_err(|message| Diagnostic {
+        let isa = build_isa(options.target, options.opt_level).map_err(|message| Diagnostic {
             function: None,
             line: 0,
             message,
@@ -238,18 +298,32 @@ impl<'m> ModuleCtx<'m> {
     }
 }
 
-/// Builds the Scry ISA used for verification and object emission.
-pub fn build_isa() -> Result<OwnedTargetIsa, String> {
+/// Builds the Cranelift ISA used for verification and object emission.
+pub fn build_isa(target: Target, opt_level: OptLevel) -> Result<OwnedTargetIsa, String> {
     let mut flag_builder = settings::builder();
-    // The Scry backend does its own scheduling; keep Cranelift's optimizer
-    // off (LLVM's `opt` has already optimized the program) so that the
-    // block structure reaches the backend unchanged.
+    // By default Cranelift's optimizer stays off: LLVM's `opt` has already
+    // optimized the program, so the block structure reaches the backend
+    // unchanged (and the Scry backend does its own scheduling).
+    let level = match opt_level {
+        OptLevel::None => "none",
+        OptLevel::Speed => "speed",
+    };
     flag_builder
-        .set("opt_level", "none")
+        .set("opt_level", level)
         .map_err(|e| e.to_string())?;
+    let mut builder =
+        cranelift_codegen::isa::lookup_by_name(target.triple()).map_err(|e| e.to_string())?;
+    if target == Target::Riscv64 {
+        // The backend insists on the G extensions (IMAFD) being enabled,
+        // but the translated programs use no floating point or atomics, so
+        // the code it emits is RV64IM; `has_zca` adds the compressed
+        // encodings (RV64IMC). No bit-manipulation extensions.
+        flag_builder
+            .set("unwind_info", "false")
+            .map_err(|e| e.to_string())?;
+        builder.set("has_zca", "true").map_err(|e| e.to_string())?;
+    }
     let flags = settings::Flags::new(flag_builder);
-    let builder = cranelift_codegen::isa::lookup_by_name("scry32-unknown-none-elf")
-        .map_err(|e| e.to_string())?;
     builder.finish(flags).map_err(|e| e.to_string())
 }
 
@@ -272,6 +346,8 @@ pub fn translate_module(module: &Module, options: &Options) -> Result<ClifModule
         externals: Vec::new(),
         skipped: Vec::new(),
         function_names: Vec::new(),
+        target: options.target,
+        opt_level: options.opt_level,
     };
     let mut runtime_imports: BTreeMap<String, Signature> = BTreeMap::new();
     let mut helpers: BTreeSet<&'static str> = BTreeSet::new();
@@ -344,7 +420,7 @@ pub fn translate_module(module: &Module, options: &Options) -> Result<ClifModule
     // (local symbols, so that every object file can carry its own copy).
     for name in &helpers {
         let func = match *name {
-            wide::UDIVMOD64 => wide::build_udivmod64(&ctx),
+            n if n == wide::udivmod_name() => wide::build_udivmod(&ctx),
             other => Err(TransError::invalid(format!("unknown helper `{other}`"))),
         }
         .map_err(|e| Diagnostic {

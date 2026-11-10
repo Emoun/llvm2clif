@@ -1,7 +1,9 @@
-//! Dynamic metrics for RISC-V (RV32IMC) programs, from a qemu execution log.
+//! Metrics for RISC-V (RV32IMC or RV64IMC) programs: static from the ELF file,
+//! dynamic from a qemu execution log.
 //!
 //! ```sh
 //! qemu-riscv32 -d exec,in_asm,nochain prog.elf 2>&1 >/dev/null | scrymetrics rv32
+//! qemu-riscv64 -d exec,in_asm,nochain prog.elf 2>&1 >/dev/null | scrymetrics rv64
 //! ```
 //!
 //! The `in_asm` blocks list every translated block (address and encoding of
@@ -109,7 +111,7 @@ fn jump_kind(rd: u8, rs1: u8) -> Ctl {
     }
 }
 
-fn decode32(pc: u32, w: u32) -> Insn {
+fn decode32(pc: u32, w: u32, rv64: bool) -> Insn {
     let opcode = w & 0x7f;
     let rd = ((w >> 7) & 0x1f) as u8;
     let funct3 = (w >> 12) & 7;
@@ -154,8 +156,10 @@ fn decode32(pc: u32, w: u32) -> Insn {
                 0 => ("lb", 1),
                 1 => ("lh", 2),
                 2 => ("lw", 4),
+                3 if rv64 => ("ld", 8),
                 4 => ("lbu", 1),
                 5 => ("lhu", 2),
+                6 if rv64 => ("lwu", 4),
                 _ => ("unknown", 0),
             };
             i = insn(pc, 4, Class::Load, m);
@@ -168,6 +172,7 @@ fn decode32(pc: u32, w: u32) -> Insn {
                 0 => ("sb", 1),
                 1 => ("sh", 2),
                 2 => ("sw", 4),
+                3 if rv64 => ("sd", 8),
                 _ => ("unknown", 0),
             };
             i = insn(pc, 4, Class::Store, m);
@@ -229,6 +234,57 @@ fn decode32(pc: u32, w: u32) -> Insn {
             i.rs1 = rs1;
             i.rs2 = rs2;
         }
+        0x1b if rv64 => {
+            // OP-IMM-32: addiw, slliw, srliw, sraiw.
+            let imm = sext(w >> 20, 12);
+            let (class, m) = match funct3 {
+                0 if rs1 == 0 => (Class::Constant, "li"),
+                0 if imm == 0 => (Class::Alu, "sext.w"),
+                0 => (Class::Alu, "addiw"),
+                1 => (Class::Alu, "slliw"),
+                5 if funct7 & 0x20 != 0 => (Class::Alu, "sraiw"),
+                5 => (Class::Alu, "srliw"),
+                _ => (Class::Other, "unknown"),
+            };
+            i = insn(pc, 4, class, m);
+            i.rd = rd;
+            i.rs1 = rs1;
+        }
+        0x3b if rv64 => {
+            // OP-32: addw, subw, sllw, srlw, sraw and the M extension's *w.
+            let m = if funct7 == 1 {
+                match funct3 {
+                    0 => "mulw",
+                    4 => "divw",
+                    5 => "divuw",
+                    6 => "remw",
+                    7 => "remuw",
+                    _ => "unknown",
+                }
+            } else {
+                match funct3 {
+                    0 if funct7 & 0x20 != 0 => "subw",
+                    0 => "addw",
+                    1 => "sllw",
+                    5 if funct7 & 0x20 != 0 => "sraw",
+                    5 => "srlw",
+                    _ => "unknown",
+                }
+            };
+            i = insn(
+                pc,
+                4,
+                if m == "unknown" {
+                    Class::Other
+                } else {
+                    Class::Alu
+                },
+                m,
+            );
+            i.rd = rd;
+            i.rs1 = rs1;
+            i.rs2 = rs2;
+        }
         0x0f => i = insn(pc, 4, Class::System, "fence"),
         0x73 => {
             let m = match w {
@@ -242,12 +298,19 @@ fn decode32(pc: u32, w: u32) -> Insn {
                 i.rs1 = rs1;
             }
         }
+        // Floating point (loads, stores, arithmetic) and atomics: counted as
+        // `other` under their own mnemonics, so that a program that was not
+        // supposed to use them shows it.
+        0x07 => i = insn(pc, 4, Class::Other, "fload"),
+        0x27 => i = insn(pc, 4, Class::Other, "fstore"),
+        0x43 | 0x47 | 0x4b | 0x4f | 0x53 => i = insn(pc, 4, Class::Other, "fp"),
+        0x2f => i = insn(pc, 4, Class::Other, "atomic"),
         _ => {}
     }
     i
 }
 
-fn decode16(pc: u32, w: u32) -> Insn {
+fn decode16(pc: u32, w: u32, rv64: bool) -> Insn {
     let op = w & 3;
     let f3 = (w >> 13) & 7;
     let rs1p = 8 + ((w >> 7) & 7) as u8;
@@ -275,6 +338,34 @@ fn decode16(pc: u32, w: u32) -> Insn {
             i.rs1 = rs1p;
             i.bytes = 4;
         }
+        (0, 3) if rv64 => {
+            i = insn(pc, 2, Class::Load, "ld");
+            i.rd = rs2p;
+            i.rs1 = rs1p;
+            i.bytes = 8;
+        }
+        (0, 7) if rv64 => {
+            i = insn(pc, 2, Class::Store, "sd");
+            i.rs2 = rs2p;
+            i.rs1 = rs1p;
+            i.bytes = 8;
+        }
+        (0, 1) | (0, 5) => {
+            i = insn(
+                pc,
+                2,
+                Class::Other,
+                if f3 == 1 { "fload" } else { "fstore" },
+            )
+        }
+        (0, 3) | (0, 7) => {
+            i = insn(
+                pc,
+                2,
+                Class::Other,
+                if f3 == 3 { "fload" } else { "fstore" },
+            )
+        }
         (1, 0) => {
             if rd == 0 {
                 i = insn(pc, 2, Class::Nop, "nop");
@@ -286,6 +377,12 @@ fn decode16(pc: u32, w: u32) -> Insn {
                     i.sp_delta = Some(sext((bit12 << 5) | ((w >> 2) & 0x1f), 6));
                 }
             }
+        }
+        (1, 1) if rv64 => {
+            // c.addiw
+            i = insn(pc, 2, Class::Alu, if rd == 0 { "unknown" } else { "addiw" });
+            i.rd = rd;
+            i.rs1 = rd;
         }
         (1, 1) => {
             i = control(insn(pc, 2, Class::Control, "jal"), Ctl::Call);
@@ -317,6 +414,11 @@ fn decode16(pc: u32, w: u32) -> Insn {
                 0 => "srli",
                 1 => "srai",
                 2 => "andi",
+                _ if bit12 == 1 && rv64 => match (w >> 5) & 3 {
+                    0 => "subw",
+                    1 => "addw",
+                    _ => "unknown",
+                },
                 _ if bit12 == 1 => "unknown",
                 _ => match (w >> 5) & 3 {
                     0 => "sub",
@@ -325,10 +427,19 @@ fn decode16(pc: u32, w: u32) -> Insn {
                     _ => "and",
                 },
             };
-            i = insn(pc, 2, Class::Alu, m);
+            i = insn(
+                pc,
+                2,
+                if m == "unknown" {
+                    Class::Other
+                } else {
+                    Class::Alu
+                },
+                m,
+            );
             i.rd = rs1p;
             i.rs1 = rs1p;
-            if matches!(m, "sub" | "xor" | "or" | "and") {
+            if matches!(m, "sub" | "xor" | "or" | "and" | "subw" | "addw") {
                 i.rs2 = rs2p;
             }
         }
@@ -384,6 +495,36 @@ fn decode16(pc: u32, w: u32) -> Insn {
             i.rs1 = SP;
             i.bytes = 4;
         }
+        (2, 3) if rv64 => {
+            // c.ldsp
+            i = insn(pc, 2, Class::Load, "ld");
+            i.rd = rd;
+            i.rs1 = SP;
+            i.bytes = 8;
+        }
+        (2, 7) if rv64 => {
+            // c.sdsp
+            i = insn(pc, 2, Class::Store, "sd");
+            i.rs2 = rs2;
+            i.rs1 = SP;
+            i.bytes = 8;
+        }
+        (2, 1) | (2, 5) => {
+            i = insn(
+                pc,
+                2,
+                Class::Other,
+                if f3 == 1 { "fload" } else { "fstore" },
+            )
+        }
+        (2, 3) | (2, 7) => {
+            i = insn(
+                pc,
+                2,
+                Class::Other,
+                if f3 == 3 { "fload" } else { "fstore" },
+            )
+        }
         _ => {}
     }
     i
@@ -411,9 +552,10 @@ fn categories(by_class: &[u64; 9]) -> BTreeMap<String, u64> {
     m
 }
 
-/// `scrymetrics rv32-static <elf>`: decodes the `.text*` sections of a RISC-V
-/// ELF file and counts the instructions by mnemonic, category and size.
-pub fn run_static(path: &str) -> Result<String, String> {
+/// `scrymetrics rv32-static <elf>` / `rv64-static`: decodes the `.text*`
+/// sections of a RISC-V ELF file and counts the instructions by mnemonic,
+/// category and size.
+pub fn run_static(path: &str, rv64: bool) -> Result<String, String> {
     let data = std::fs::read(path).map_err(|e| format!("{path}: {e}"))?;
     let file = object::File::parse(&*data).map_err(|e| format!("{path}: {e}"))?;
     let mut by_mnemonic: HashMap<&'static str, u64> = HashMap::new();
@@ -430,7 +572,7 @@ pub fn run_static(path: &str) -> Result<String, String> {
             let lo = u16::from_le_bytes([code[off], code[off + 1]]) as u32;
             let i = if lo & 3 != 3 {
                 off += 2;
-                decode16(0, lo)
+                decode16(0, lo, rv64)
             } else {
                 if off + 4 > code.len() {
                     break;
@@ -438,7 +580,7 @@ pub fn run_static(path: &str) -> Result<String, String> {
                 let w =
                     u32::from_le_bytes([code[off], code[off + 1], code[off + 2], code[off + 3]]);
                 off += 4;
-                decode32(0, w)
+                decode32(0, w, rv64)
             };
             count += 1;
             if i.size == 2 {
@@ -465,6 +607,9 @@ pub fn run_static(path: &str) -> Result<String, String> {
 
 #[derive(Default)]
 pub struct Rv32 {
+    /// Decode RV64 (`ld`, `sd`, the `*w` operations and their compressed
+    /// forms) instead of RV32.
+    rv64: bool,
     arena: Vec<Insn>,
     /// Translated blocks by start address: (index into `arena`, length).
     blocks: HashMap<u32, (u32, u32)>,
@@ -485,6 +630,13 @@ pub struct Rv32 {
     /// After a conditional branch: the address of the next instruction if it
     /// is not taken.
     fallthrough: Option<u32>,
+    /// The register the previous instruction wrote with `lui`, `auipc` or
+    /// `li`: an `addi` on it completes a constant or address, a load from it
+    /// reads a constant pool (Cranelift's riscv64 backend keeps 64-bit
+    /// constants and symbol addresses in the code), so both count as
+    /// constant materialization rather than arithmetic or memory traffic.
+    const_base: Option<u8>,
+    pool_loads: u64,
 
     // Register values: position of the current definition and of its last use.
     def_pos: [Option<u64>; 32],
@@ -515,8 +667,9 @@ pub struct Rv32 {
 }
 
 impl Rv32 {
-    pub fn new() -> Self {
+    pub fn new(rv64: bool) -> Self {
         Rv32 {
+            rv64,
             sp: Some(0),
             sp_known: true,
             ..Default::default()
@@ -548,9 +701,9 @@ impl Rv32 {
                 if let (Some(pc), Some(enc)) = (pc, enc) {
                     if let Ok(w) = u32::from_str_radix(enc, 16) {
                         let decoded = if enc.len() <= 4 {
-                            decode16(pc, w)
+                            decode16(pc, w, self.rv64)
                         } else {
-                            decode32(pc, w)
+                            decode32(pc, w, self.rv64)
                         };
                         if self.block_start.is_none() {
                             self.block_start = Some((pc, self.arena.len()));
@@ -581,10 +734,25 @@ impl Rv32 {
         }
     }
 
-    fn step(&mut self, i: Insn) {
+    fn step(&mut self, mut i: Insn) {
         let t = self.steps;
         self.steps += 1;
         self.occupancy_diff.push(0);
+        // The second half of a two-instruction constant or address.
+        let base = self.const_base.take();
+        let continues = base
+            .is_some_and(|b| b == i.rs1 && (i.mnemonic == "addi" || i.mnemonic == "addiw"))
+            || (base.is_some_and(|b| b == i.rs1) && i.class == Class::Load && i.rd != SP);
+        if continues {
+            if i.class == Class::Load {
+                self.pool_loads += 1;
+                i.mnemonic = "ld.pool";
+            }
+            i.class = Class::Constant;
+        }
+        if matches!(i.mnemonic, "lui" | "auipc" | "li") && i.rd != 0 {
+            self.const_base = Some(i.rd);
+        }
         self.by_class[i.class as usize] += 1;
         *self.by_mnemonic.entry(i.mnemonic).or_default() += 1;
         if i.size == 2 {
@@ -710,7 +878,7 @@ impl Rv32 {
             "{{\"instructions\": {}, \"blocks_executed\": {}, \"missing_blocks\": {}, \"by_category\": {}, \"by_mnemonic\": {}, \"forms\": {}, \
              \"operands\": {{\"defined\": {}, \"discarded\": {}, \"live_at_end\": {}, \"lifetime\": {}, \"discarded_lifetime\": {}}}, \
              \"occupancy\": {}, \"blocks\": {}, \
-             \"memory\": {{\"loads\": {}, \"stores\": {}, \"load_bytes\": {}, \"store_bytes\": {}, \"stack_loads\": {}, \"stack_stores\": {}}}, \
+             \"memory\": {{\"loads\": {}, \"stores\": {}, \"load_bytes\": {}, \"store_bytes\": {}, \"stack_loads\": {}, \"stack_stores\": {}, \"pool_loads\": {}}}, \
              \"stack\": {{\"max_depth_bytes\": {}, \"known\": {}}}}}",
             self.steps,
             self.traces,
@@ -731,6 +899,7 @@ impl Rv32 {
             self.store_bytes,
             self.stack_loads,
             self.stack_stores,
+            self.pool_loads,
             -self.sp_min,
             self.sp_known,
         )

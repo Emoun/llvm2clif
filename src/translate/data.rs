@@ -1,6 +1,6 @@
 //! Translation of global variables into byte images with relocations.
 
-use super::types::{truncate_const, Layout};
+use super::types::{truncate_const, truncate_const128, word_bits, Layout};
 use super::{ClifData, DataInit, DataReloc, ModuleCtx, TResult, TransError};
 use crate::llvm::*;
 
@@ -176,7 +176,7 @@ fn fold_int(layout: &Layout, c: &Constant) -> TResult<Option<i128>> {
 fn int_bits(layout: &Layout, ty: &Type) -> TResult<u32> {
     match layout.resolve(ty)? {
         Type::Int(b) => Ok(*b),
-        Type::Ptr(_) => Ok(32),
+        Type::Ptr(_) => Ok(word_bits()),
         other => Err(TransError::invalid(format!(
             "expected an integer type, found {other}"
         ))),
@@ -316,7 +316,7 @@ fn write_const(
             // Global references, constant expressions.
             if let Some((symbol, addend)) = symbol_offset(layout, c)? {
                 let size = layout.store_size(ty)?;
-                if size != 4 {
+                if size != layout.dl.ptr_bytes() {
                     return Err(TransError::unsupported(format!(
                         "a symbol address stored in a {size}-byte field is not supported"
                     )));
@@ -339,7 +339,7 @@ fn write_const(
             if let Some(v) = fold_int(layout, c)? {
                 let bits = int_bits(layout, ty)?;
                 let bytes = layout.store_size(ty)? as usize;
-                let val = truncate_const(v, bits.min(64)).to_le_bytes();
+                let val = truncate_const128(v, bits).to_le_bytes();
                 buf[offset as usize..offset as usize + bytes].copy_from_slice(&val[..bytes]);
                 return Ok(());
             }

@@ -421,6 +421,7 @@ fn translate_ll(cfg: &Config, ll: &Path) -> anyhow::Result<crate::translate::Cli
     let options = Options {
         skip_unsupported: cfg.skip_unsupported,
         verify: true,
+        ..Options::default()
     };
     let translated = crate::translate::translate_module(&module, &options)
         .map_err(|e| anyhow!("{}: {e}", ll.display()))?;

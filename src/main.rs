@@ -1,26 +1,45 @@
 //! `llvm2clif`: translate an LLVM IR (`.ll`) file into Cranelift IR and
-//! compile it for the Scry ISA.
+//! compile it for the Scry ISA (or for riscv64, to compare the ISAs through
+//! the same translation).
 
 use anyhow::{bail, Context};
 use clap::{Parser, ValueEnum};
+use llvm2clif::translate::{OptLevel, Target};
 use std::path::PathBuf;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 enum Emit {
-    /// A Scry ELF relocatable object file.
+    /// An ELF relocatable object file.
     Obj,
     /// Textual Cranelift IR.
     Clif,
-    /// The Scry machine code produced by the backend, disassembled.
+    /// The machine code produced by the backend, disassembled.
     Asm,
 }
 
-/// Translate LLVM IR into Cranelift IR for the Scry ISA.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum TargetArg {
+    /// Scry (32-bit), through the Scry backend.
+    Scry32,
+    /// RISC-V RV64IMC, through Cranelift's riscv64 backend; the IR must come
+    /// from a 64-bit target (`--target=riscv64-unknown-none-elf`).
+    Riscv64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum OptLevelArg {
+    /// No Cranelift mid-end optimization (the IR comes optimized from `opt`).
+    None,
+    /// Cranelift's own optimizations as well.
+    Speed,
+}
+
+/// Translate LLVM IR into Cranelift IR and compile it for the Scry ISA.
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct Cli {
     /// The LLVM IR text file (`.ll`) to translate. A `.clif` file is
-    /// compiled directly with the Scry backend instead.
+    /// compiled directly with the backend instead.
     input: PathBuf,
 
     /// Output file. Defaults to the input name with a `.o` (or `.clif`)
@@ -40,6 +59,14 @@ struct Cli {
     /// Do not run the Cranelift IR verifier on the translated functions.
     #[arg(long)]
     no_verify: bool,
+
+    /// The machine to compile for.
+    #[arg(long, value_enum, default_value_t = TargetArg::Scry32)]
+    target: TargetArg,
+
+    /// Cranelift's optimization level.
+    #[arg(long, value_enum, default_value_t = OptLevelArg::None)]
+    opt_level: OptLevelArg,
 }
 
 fn main() {
@@ -59,15 +86,28 @@ fn run() -> anyhow::Result<()> {
         .input
         .extension()
         .is_some_and(|e| e.eq_ignore_ascii_case("clif"));
+    let target = match cli.target {
+        TargetArg::Scry32 => Target::Scry32,
+        TargetArg::Riscv64 => Target::Riscv64,
+    };
+    let opt_level = match cli.opt_level {
+        OptLevelArg::None => OptLevel::None,
+        OptLevelArg::Speed => OptLevel::Speed,
+    };
     let translated = if is_clif {
-        llvm2clif::emit::module_from_clif(&src)
-            .map_err(|e| anyhow::anyhow!("{}: {e}", cli.input.display()))?
+        let mut m = llvm2clif::emit::module_from_clif(&src)
+            .map_err(|e| anyhow::anyhow!("{}: {e}", cli.input.display()))?;
+        m.target = target;
+        m.opt_level = opt_level;
+        m
     } else {
         let module = llvm2clif::llvm::parse_module(&src)
             .map_err(|e| anyhow::anyhow!("{}: {e}", cli.input.display()))?;
         let options = llvm2clif::translate::Options {
             skip_unsupported: cli.skip_unsupported,
             verify: !cli.no_verify,
+            target,
+            opt_level,
         };
         let translated = llvm2clif::translate::translate_module(&module, &options)
             .map_err(|e| anyhow::anyhow!("{}: {e}", cli.input.display()))?;

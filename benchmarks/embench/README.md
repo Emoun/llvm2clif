@@ -88,20 +88,22 @@ Rust tool with two passes: `static` decodes the `.text` section of an ELF
 file with the `scry_isa` crate, and `dynamic` reads the event stream of
 `scryer --print-events` from standard input, one step at a time (nothing is
 stored; a 20 M-instruction benchmark streams about 2 GB through the pipe).
-With `--rv32` it also builds every benchmark for rv32imc, runs it on
-`qemu-riscv32` and measures it the same way, for comparison.
+With `--rv64` and `--rv32` it also builds every benchmark for RISC-V, runs
+it on qemu and measures it the same way, for comparison: rv64imc through
+`llvm2clif` and Cranelift's riscv64 backend (the same translation as for
+Scry), and rv32imc through LLVM's own backend.
 
 ```sh
-cargo build --release --manifest-path tools/scrymetrics/Cargo.toml
+cargo build --release && cargo build --release --manifest-path tools/scrymetrics/Cargo.toml
 python3 benchmarks/embench/metrics.py                 # every out/<name>/<name>.elf, 3 at a time
-python3 benchmarks/embench/metrics.py --tables-only   # re-print the tables from out/*/metrics.json
+python3 benchmarks/embench/metrics.py --tables-only   # re-print the tables from out/*/*.json
 python3 benchmarks/embench/metrics.py --only crc32 --sim-args "--timeout 1000000 --timeout-type instructions"
 SCRY_CLANG=clang-18 SCRY_OPT=opt-18 SCRY_LLC=llc-18 SCRY_LLD=ld.lld-18 \
-    python3 benchmarks/embench/metrics.py --rv32 --skip-scry   # the RISC-V side only (needs qemu-riscv32)
+    python3 benchmarks/embench/metrics.py --rv64 --rv32 --skip-scry   # the RISC-V sides only (needs qemu-user)
 ```
 
-Results go to `out/<name>/metrics.json` and `out/<name>/rv32imc.json`; the
-tables below are what the script prints. Streaming events costs the simulator most of its speed
+Results go to `out/<name>/metrics.json`, `rv64cl.json` and `rv32imc.json`;
+the tables below are what the script prints. Streaming events costs the simulator most of its speed
 (about 80 k instructions per second, against several hundred thousand
 without), so the metrics run over the 17 benchmarks takes about half an
 hour with three jobs. `--sim-args` passes options on to the
@@ -250,140 +252,164 @@ above (rust-wasmtime `f9fa226`, scryer `b1737e6`, wild `2b9f2b4`).
 | ud | 416300 | 150108 | 1 | 1787 | 1664724 | 607340 | 3.3 | 416 |
 | xgboost | 1676176 | 2560 | 1283 | 1539 | 1685660 | 11276 | 4.8 | 64 |
 
-### Against rv32imc
+### Against RISC-V
 
-The comparison uses the same optimized IR. Each source goes through the
-same `clang -O2 -S -emit-llvm -Xclang -disable-llvm-passes` and `opt -O2`
-steps as in `scry-cc`, and the result is compiled with `llc` for `rv32imc`
-(and for `rv32im`, for its code size) instead of being translated by
-`llvm2clif`; the same runtime library and board support are linked in,
-with `ld.lld` (relaxation on) and a four-instruction `_start`
-(`rv32_crt0.S`). The programs run on `qemu-riscv32` (user mode, qemu 8.2)
-with the execution log of `-d exec,in_asm,nochain` piped into
-`scrymetrics rv32`, which decodes the instructions itself and derives the
-register data flow from the decoded operands: a value lives from the
-instruction that writes a register to the last one that reads it before
-the register is written again, and the live values after an instruction
-are those still to be read. In the RISC-V mix, `constant` is `lui`,
-`auipc` and `li`, and `move` is `mv`; everything else that is not control
-flow or memory is `alu`. Every benchmark returns 0 from `main` on qemu, so
-the RISC-V builds pass their verification too, and the instruction counts
-were checked against runs with one instruction per translated block. The
-code bytes are the `.text` sections of the linked executables (the earlier
-object-level comparison overstated RISC-V by 4 %, since the linker's
-relaxation had not been applied).
+Two RISC-V builds of every benchmark stand next to the Scry one, both from
+the same optimized IR: each source goes through the same
+`clang -O2 -S -emit-llvm -Xclang -disable-llvm-passes` and `opt -O2` steps
+as in `scry-cc`, with the same runtime library, board support and flags,
+and only the back end differs.
 
-### Scry against rv32imc: instructions
+* **rv64imc through llvm2clif and Cranelift** (`rv64imc Cranelift` in the
+  tables): the IR is produced for `riscv64-unknown-none-elf` (64-bit
+  pointers, native `i64`) and translated by `llvm2clif --target riscv64`,
+  the same translation as for Scry with a 64-bit word, then compiled by
+  Cranelift's riscv64 backend with the compressed encodings enabled and,
+  as for Scry, Cranelift's optimizer off (the IR arrives optimized). The
+  backend insists on the G extensions being enabled, but the programs use
+  no floating point or atomics, so the code it emits is RV64IMC; it is
+  checked by the decoder, which counts floating-point and atomic
+  instructions apart (none run). Functions and globals are addressed
+  PC-relatively; 64-bit constants that do not fit an immediate come from a
+  constant pool in the code (`auipc` and a load), which the static count
+  shows as `other`. The same build with Cranelift's optimizer on
+  (`opt_level=speed`) is given as a further data point in the first table.
+  This is the comparison that isolates the ISA: the same compiler front
+  end, the same translation and the same compiler infrastructure on both
+  sides.
+* **rv32imc through LLVM** (`rv32imc llc` in the tables): the IR for
+  `riscv32-unknown-none-elf` compiled with `llc` (and `rv32im` too, for its
+  code size), a conventional compiler's best effort for the ISA, which
+  shows how much of the distance is the back end rather than the ISA.
 
-| benchmark | executed on Scry | executed on rv32imc | ratio | instruction bytes fetched, ratio | static Scry | static rv32imc | ratio |
+Both are linked with `ld.lld` (relaxation on for the LLVM build; Cranelift
+emits no relaxation relocations) and a four-instruction `_start`
+(`riscv_crt0.S`), and run on qemu 8.2 in user mode (`qemu-riscv64`,
+`qemu-riscv32`) with the execution log of `-d exec,in_asm,nochain` piped
+into `scrymetrics rv64` or `rv32`, which decodes the instructions itself
+and derives the register data flow from the decoded operands: a value lives
+from the instruction that writes a register to the last one that reads it
+before the register is written again, and the live values after an
+instruction are those still to be read. In the RISC-V mix, `constant` is
+`lui`, `auipc` and `li`, plus the `addi` that completes a two-instruction
+constant or address and the constant-pool load that follows an `auipc`;
+`move` is `mv`; everything else that is not control flow or memory is
+`alu`. Every benchmark returns 0 from `main` on qemu, so all the RISC-V
+builds pass their verification too, and the instruction counts were checked
+against runs with one instruction per translated block. The code bytes are
+the `.text` sections of the linked executables.
+
+### Scry against RISC-V: instructions executed
+
+| benchmark | Scry | rv64imc Cranelift | Scry ratio | rv32imc llc | Scry ratio | rv64imc Cranelift, optimizer on | Scry ratio |
 |---|---:|---:|---:|---:|---:|---:|---:|
-| aha-mont64 | 66837654 | 6495889 | 10.29 | 5.87 | 2024 | 788 | 2.57 |
-| crc32 | 15950330 | 4030049 | 3.96 | 2.76 | 336 | 493 | 0.68 |
-| depthconv | 18134577 | 2721074 | 6.66 | 3.75 | 534 | 533 | 1.00 |
-| edn | 25880475 | 3867234 | 6.69 | 4.13 | 2132 | 1006 | 2.12 |
-| huffbench | 25154520 | 2991816 | 8.41 | 5.72 | 3614 | 992 | 3.64 |
-| matmult-int | 12214699 | 1876139 | 6.51 | 3.96 | 1430 | 763 | 1.87 |
-| md5sum | 17861357 | 3272668 | 5.46 | 3.77 | 1142 | 642 | 1.78 |
-| nettle-aes | 18691343 | 3537884 | 5.28 | 3.20 | 4364 | 1434 | 3.04 |
-| nsichneu | 16681595 | 2009931 | 8.30 | 5.05 | 33368 | 4674 | 7.14 |
-| picojpeg | 15514899 | 3608659 | 4.30 | 2.67 | 33278 | 6515 | 5.11 |
-| qrduino | 21502235 | 3604362 | 5.97 | 3.71 | 14012 | 3493 | 4.01 |
-| sglib-combined | 20901068 | 2882838 | 7.25 | 5.20 | 7822 | 3174 | 2.46 |
-| slre | 23862386 | 2937030 | 8.12 | 5.55 | 9840 | 1537 | 6.40 |
-| statemate | 10091747 | 3485148 | 2.90 | 1.57 | 6146 | 2047 | 3.00 |
-| tarfind | 15431905 | 2702109 | 5.71 | 3.36 | 1794 | 652 | 2.75 |
-| ud | 17481193 | 2581831 | 6.77 | 4.61 | 1568 | 744 | 2.11 |
-| xgboost | 35299960 | 6775071 | 5.21 | 3.23 | 654 | 618 | 1.06 |
-| **total** | **377491943** | **59379732** | **6.36** | **3.96** | **124058** | **30105** | **4.12** |
+| aha-mont64 | 66837654 | 4544346 | 14.71 | 6495889 | 10.29 | 3735470 | 17.89 |
+| crc32 | 15950330 | 6308852 | 2.53 | 4030049 | 3.96 | 6133581 | 2.60 |
+| depthconv | 18134577 | 3323259 | 5.46 | 2721074 | 6.66 | 3639654 | 4.98 |
+| edn | 25880475 | 8629078 | 3.00 | 3867234 | 6.69 | 7843978 | 3.30 |
+| huffbench | 25154520 | 6162414 | 4.08 | 2991816 | 8.41 | 4987616 | 5.04 |
+| matmult-int | 12214699 | 5717048 | 2.14 | 1876139 | 6.51 | 4233602 | 2.89 |
+| md5sum | 17861357 | 4510404 | 3.96 | 3272668 | 5.46 | 4311284 | 4.14 |
+| nettle-aes | 18691343 | 6910189 | 2.70 | 3537884 | 5.28 | 7042836 | 2.65 |
+| nsichneu | 16681595 | 5424206 | 3.08 | 2009931 | 8.30 | 2979167 | 5.60 |
+| picojpeg | 15514899 | 8646407 | 1.79 | 3608659 | 4.30 | 6705161 | 2.31 |
+| qrduino | 21502235 | 6060314 | 3.55 | 3604362 | 5.97 | 5488094 | 3.92 |
+| sglib-combined | 20901068 | 4411218 | 4.74 | 2882838 | 7.25 | 4398356 | 4.75 |
+| slre | 23862386 | 5582906 | 4.27 | 2937030 | 8.12 | 5647631 | 4.23 |
+| statemate | 10091747 | 5090968 | 1.98 | 3485148 | 2.90 | 5094263 | 1.98 |
+| tarfind | 15431905 | 3733769 | 4.13 | 2702109 | 5.71 | 4439243 | 3.48 |
+| ud | 17481193 | 4842804 | 3.61 | 2581831 | 6.77 | 3577199 | 4.89 |
+| xgboost | 35299960 | 11693931 | 3.02 | 6775071 | 5.21 | 9508055 | 3.71 |
+| **total** | **377491943** | **101592113** | **3.72** | **59379732** | **6.36** | **89765190** | **4.21** |
 
-### Code size against rv32imc and rv32im
+### Code size against RISC-V
 
-| benchmark | Scry bytes | rv32imc bytes | ratio | rv32im bytes | ratio | rv32imc compressed % |
-|---|---:|---:|---:|---:|---:|---:|
-| aha-mont64 | 4048 | 2188 | 1.85 | 3160 | 1.28 |  61.2 |
-| crc32 | 672 | 1378 | 0.49 | 1972 | 0.34 |  60.2 |
-| depthconv | 1068 | 1574 | 0.68 | 2124 | 0.50 |  52.3 |
-| edn | 4264 | 2928 | 1.46 | 4008 | 1.06 |  54.5 |
-| huffbench | 7228 | 2750 | 2.63 | 3960 | 1.83 |  61.4 |
-| matmult-int | 2860 | 2208 | 1.30 | 3012 | 0.95 |  55.3 |
-| md5sum | 2284 | 1846 | 1.24 | 2568 | 0.89 |  56.2 |
-| nettle-aes | 8728 | 4290 | 2.03 | 5696 | 1.53 |  50.4 |
-| nsichneu | 66736 | 13828 | 4.83 | 18696 | 3.57 |  52.1 |
-| picojpeg | 66556 | 21316 | 3.12 | 26156 | 2.54 |  36.4 |
-| qrduino | 28024 | 10852 | 2.58 | 13956 | 2.01 |  44.7 |
-| sglib-combined | 15644 | 8464 | 1.85 | 12700 | 1.23 |  66.7 |
-| slre | 19680 | 4386 | 4.49 | 6104 | 3.22 |  57.3 |
-| statemate | 12292 | 6944 | 1.77 | 8184 | 1.50 |  30.4 |
-| tarfind | 3588 | 1838 | 1.95 | 2608 | 1.38 |  59.0 |
-| ud | 3136 | 2172 | 1.44 | 2972 | 1.06 |  54.0 |
-| xgboost | 1308 | 1788 | 0.73 | 2472 | 0.53 |  55.3 |
-| **total** | **248116** | **90750** | **2.73** | **120348** | **2.06** | |
+| benchmark | Scry bytes | static instructions | rv64imc Cranelift bytes | Scry ratio | static instructions | compressed % | rv32imc llc bytes | Scry ratio | static instructions | compressed % | rv32im llc bytes | Scry ratio |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| aha-mont64 | 4048 | 2024 | 2752 | 1.47 | 972 | 58.4 | 2188 | 1.85 | 788 | 61.2 | 3160 | 1.28 |
+| crc32 | 672 | 336 | 2246 | 0.30 | 769 | 54.0 | 1378 | 0.49 | 493 | 60.2 | 1972 | 0.34 |
+| depthconv | 1068 | 534 | 2286 | 0.47 | 762 | 50.0 | 1574 | 0.68 | 533 | 52.3 | 2124 | 0.50 |
+| edn | 4264 | 2132 | 4582 | 0.93 | 1521 | 49.4 | 2928 | 1.46 | 1006 | 54.5 | 4008 | 1.06 |
+| huffbench | 7228 | 3614 | 4406 | 1.64 | 1509 | 54.0 | 2750 | 2.63 | 992 | 61.4 | 3960 | 1.83 |
+| matmult-int | 2860 | 1430 | 3774 | 0.76 | 1258 | 50.0 | 2208 | 1.30 | 763 | 55.3 | 3012 | 0.95 |
+| md5sum | 2284 | 1142 | 2710 | 0.84 | 907 | 50.6 | 1846 | 1.24 | 642 | 56.2 | 2568 | 0.89 |
+| nettle-aes | 8728 | 4364 | 7142 | 1.22 | 2302 | 44.9 | 4290 | 2.03 | 1434 | 50.4 | 5696 | 1.53 |
+| nsichneu | 66736 | 33368 | 35126 | 1.90 | 10819 | 37.7 | 13828 | 4.83 | 4674 | 52.1 | 18696 | 3.57 |
+| picojpeg | 66556 | 33278 | 42852 | 1.55 | 12959 | 34.7 | 21316 | 3.12 | 6515 | 36.4 | 26156 | 2.54 |
+| qrduino | 28024 | 14012 | 18428 | 1.52 | 5660 | 37.2 | 10852 | 2.58 | 3493 | 44.7 | 13956 | 2.01 |
+| sglib-combined | 15644 | 7822 | 13372 | 1.17 | 4733 | 58.7 | 8464 | 1.85 | 3174 | 66.7 | 12700 | 1.23 |
+| slre | 19680 | 9840 | 8598 | 2.29 | 2946 | 54.1 | 4386 | 4.49 | 1537 | 57.3 | 6104 | 3.22 |
+| statemate | 12292 | 6146 | 14382 | 0.85 | 4235 | 30.2 | 6944 | 1.77 | 2047 | 30.4 | 8184 | 1.50 |
+| tarfind | 3588 | 1794 | 2734 | 1.31 | 914 | 50.4 | 1838 | 1.95 | 652 | 59.0 | 2608 | 1.38 |
+| ud | 3136 | 1568 | 3470 | 0.90 | 1157 | 50.0 | 2172 | 1.44 | 744 | 54.0 | 2972 | 1.06 |
+| xgboost | 1308 | 654 | 2726 | 0.48 | 935 | 54.2 | 1788 | 0.73 | 618 | 55.3 | 2472 | 0.53 |
+| **total** | **248116** | | **171586** | **1.45** | | | **90750** | **2.73** | | | **120348** | **2.06** |
 
-### rv32imc dynamic instruction mix
+### RISC-V dynamic instruction mix (rv64imc Cranelift / rv32imc llc)
 
-| benchmark | instructions | alu % | constant % | move % | control % | memory % | other % | compressed % | branches taken % |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| aha-mont64 | 6495889 |  90.6 |   0.2 |   0.9 |   7.2 |   1.1 |   0.0 |  24.7 |  47.1 |
-| crc32 | 4030049 |  60.8 |  13.1 |   0.0 |  13.1 |  13.0 |   0.0 |  56.5 |  99.6 |
-| depthconv | 2721074 |  64.2 |   4.3 |   0.0 |   9.9 |  21.6 |   0.0 |  22.2 |  26.4 |
-| edn | 3867234 |  61.6 |   0.4 |   2.4 |  10.0 |  25.7 |   0.0 |  38.0 |  97.3 |
-| huffbench | 2991816 |  45.9 |   0.9 |   7.3 |  22.2 |  23.6 |   0.0 |  53.0 |  60.0 |
-| matmult-int | 1876139 |  49.4 |   0.1 |   6.9 |   8.0 |  35.6 |   0.0 |  35.6 |  98.1 |
-| md5sum | 3272668 |  52.6 |   0.2 |  17.6 |  14.8 |  14.8 |   0.0 |  55.2 |  64.0 |
-| nettle-aes | 3537884 |  73.2 |   0.1 |   0.3 |   2.2 |  24.2 |   0.0 |  35.1 |  58.0 |
-| nsichneu | 2009931 |   0.1 |   0.0 |   0.1 |  38.5 |  61.3 |   0.0 |  35.6 |  21.1 |
-| picojpeg | 3608659 |  51.8 |   7.1 |   3.9 |  10.7 |  26.5 |   0.0 |  39.1 |  72.0 |
-| qrduino | 3604362 |  64.0 |   0.8 |   1.6 |  15.0 |  18.6 |   0.0 |  39.4 |  39.1 |
-| sglib-combined | 2882838 |  30.0 |   4.8 |   6.1 |  24.6 |  34.6 |   0.0 |  60.7 |  43.7 |
-| slre | 2937030 |  21.1 |  16.9 |   5.2 |  23.4 |  33.4 |   0.0 |  53.7 |  45.4 |
-| statemate | 3485148 |   7.4 |  26.7 |   6.4 |  13.4 |  46.2 |   0.0 |  15.0 |  83.0 |
-| tarfind | 2702109 |  38.0 |   4.2 |  16.4 |  20.9 |  20.6 |   0.0 |  30.2 |  95.8 |
-| ud | 2581831 |  52.4 |   2.4 |   9.5 |  12.5 |  23.1 |   0.0 |  53.1 |  51.0 |
-| xgboost | 6775071 |  49.3 |   1.6 |   7.8 |  16.4 |  24.9 |   0.0 |  38.8 |  37.3 |
+| benchmark | alu % | constant % | move % | control % | memory % | other % | compressed % | branches taken % |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| aha-mont64 | 58.2 / 90.6 | 15.5 / 0.2 | 9.6 / 0.9 | 14.8 / 7.2 | 2.0 / 1.1 | 0.0 / 0.0 | 43.3 / 24.7 | 45.7 / 47.1 |
+| crc32 | 41.7 / 52.2 | 41.7 / 26.1 | 0.0 / 0.0 | 8.3 / 13.1 | 8.3 / 8.7 | 0.0 / 0.0 | 36.1 / 56.5 | 99.6 / 99.6 |
+| depthconv | 50.6 / 63.9 | 23.8 / 4.6 | 3.3 / 0.0 | 4.9 / 9.9 | 17.4 / 21.6 | 0.0 / 0.0 | 33.5 / 22.2 | 97.9 / 26.4 |
+| edn | 63.1 / 61.6 | 16.9 / 0.4 | 2.4 / 2.4 | 6.1 / 10.0 | 11.5 / 25.7 | 0.0 / 0.0 | 45.2 / 38.0 | 62.4 / 97.3 |
+| huffbench | 42.3 / 45.9 | 19.2 / 0.9 | 8.3 / 7.3 | 17.6 / 22.2 | 12.5 / 23.6 | 0.0 / 0.0 | 54.1 / 53.0 | 22.2 / 60.0 |
+| matmult-int | 39.9 / 49.4 | 17.3 / 0.1 | 9.0 / 6.9 | 9.6 / 8.0 | 24.2 / 35.6 | 0.0 / 0.0 | 43.8 / 35.6 | 3.2 / 98.1 |
+| md5sum | 41.6 / 52.6 | 15.3 / 0.2 | 15.5 / 17.6 | 16.8 / 14.8 | 10.7 / 14.8 | 0.0 / 0.0 | 38.5 / 55.2 | 12.5 / 64.0 |
+| nettle-aes | 75.3 / 73.2 | 9.2 / 0.1 | 1.3 / 0.3 | 1.8 / 2.2 | 12.4 / 24.2 | 0.0 / 0.0 | 43.0 / 35.1 | 86.7 / 58.0 |
+| nsichneu | 11.6 / 0.1 | 51.2 / 0.0 | 0.0 / 0.1 | 14.5 / 38.5 | 22.7 / 61.3 | 0.0 / 0.0 | 37.4 / 35.6 | 20.7 / 21.1 |
+| picojpeg | 40.8 / 48.3 | 11.3 / 11.2 | 4.2 / 3.9 | 33.3 / 10.7 | 10.4 / 25.9 | 0.0 / 0.0 | 49.0 / 39.1 | 43.3 / 72.0 |
+| qrduino | 55.3 / 64.0 | 15.6 / 0.9 | 3.5 / 1.6 | 14.0 / 15.0 | 11.5 / 18.5 | 0.0 / 0.0 | 31.7 / 39.4 | 46.7 / 39.1 |
+| sglib-combined | 41.2 / 29.8 | 12.0 / 6.0 | 5.1 / 6.1 | 18.1 / 24.6 | 23.6 / 33.5 | 0.0 / 0.0 | 46.9 / 60.7 | 39.8 / 43.7 |
+| slre | 41.2 / 20.7 | 17.3 / 17.4 | 5.3 / 5.2 | 16.2 / 23.4 | 20.1 / 33.4 | 0.0 / 0.0 | 43.2 / 53.7 | 49.0 / 45.4 |
+| statemate | 8.1 / 6.8 | 56.7 / 37.1 | 1.2 / 6.4 | 6.1 / 13.4 | 27.9 / 36.3 | 0.0 / 0.0 | 11.0 / 15.0 | 57.1 / 83.0 |
+| tarfind | 34.3 / 35.3 | 12.4 / 8.2 | 11.8 / 16.4 | 26.6 / 20.9 | 14.9 / 19.3 | 0.0 / 0.0 | 44.2 / 30.2 | 9.8 / 95.8 |
+| ud | 47.9 / 52.2 | 29.3 / 2.8 | 2.4 / 9.5 | 8.1 / 12.5 | 12.4 / 23.0 | 0.0 / 0.0 | 32.1 / 53.1 | 60.4 / 51.0 |
+| xgboost | 53.3 / 49.3 | 23.6 / 1.6 | 1.5 / 7.8 | 7.2 / 16.4 | 14.4 / 24.9 | 0.0 / 0.0 | 23.0 / 38.8 | 68.3 / 37.3 |
 
-### Values: Scry operands against rv32imc register values (Scry / rv32imc)
+### Values: Scry operands against RISC-V register values (Scry / rv64imc Cranelift / rv32imc llc)
 
 | benchmark | lifetime median | mean | p90 | live values mean | max | never used % |
 |---|---:|---:|---:|---:|---:|---:|
-| aha-mont64 | 4 / 3 | 94.0 / 22.4 | 172 / 28 | 55.8 / 22.7 | 79 / 28 | 4.6 / 0.2 |
-| crc32 | 1 / 2 | 13.3 / 11.6 | 7 / 21 | 8.9 / 11.1 | 12 / 13 | 0.0 / 0.0 |
-| depthconv | 1 / 4 | 20.7 / 15.7 | 44 / 51 | 15.6 / 14.9 | 30 / 19 | 2.7 / 0.3 |
-| edn | 1 / 5 | 22.7 / 21.6 | 35 / 12 | 13.1 / 21.1 | 85 / 30 | 0.2 / 0.5 |
-| huffbench | 1 / 4 | 33.6 / 20.8 | 34 / 15 | 17.3 / 17.2 | 26 / 23 | 3.4 / 1.9 |
-| matmult-int | 1 / 3 | 53.9 / 19.1 | 26 / 6 | 36.2 / 17.6 | 72 / 27 | 0.3 / 0.1 |
-| md5sum | 1 / 4 | 37.8 / 28.3 | 33 / 33 | 20.5 / 23.2 | 28 / 30 | 0.0 / 0.3 |
-| nettle-aes | 1 / 1 | 54.6 / 23.1 | 155 / 19 | 39.0 / 23.3 | 72 / 29 | 0.3 / 0.1 |
-| nsichneu | 1 / 1 | 10.3 / 27.5 | 4 / 2 | 6.3 / 18.8 | 9 / 20 | 3.1 / 0.0 |
-| picojpeg | 2 / 3 | 24.5 / 16.8 | 40 / 23 | 16.1 / 18.2 | 43 / 28 | 3.2 / 1.4 |
-| qrduino | 1 / 2 | 35.1 / 22.3 | 38 / 18 | 19.4 / 20.0 | 68 / 29 | 3.5 / 0.6 |
-| sglib-combined | 2 / 3 | 44.6 / 22.9 | 34 / 16 | 18.3 / 16.1 | 36 / 24 | 5.2 / 2.2 |
-| slre | 2 / 2 | 136.8 / 15.6 | 75 / 40 | 65.2 / 14.9 | 90 / 24 | 10.2 / 10.2 |
-| statemate | 1 / 3 | 12.6 / 20.0 | 5 / 39 | 9.9 / 14.7 | 38 / 21 | 1.7 / 1.8 |
-| tarfind | 1 / 3 | 26.8 / 25.8 | 24 / 7 | 15.7 / 17.3 | 20 / 19 | 0.4 / 0.7 |
-| ud | 1 / 5 | 28.5 / 28.7 | 42 / 38 | 16.1 / 23.9 | 25 / 30 | 1.6 / 6.6 |
-| xgboost | 1 / 2 | 35.6 / 28.0 | 81 / 34 | 17.0 / 23.8 | 22 / 27 | 3.4 / 2.9 |
+| aha-mont64 | 4 / 2 / 3 | 94.0 / 17.4 / 22.4 | 172 / 17 / 28 | 55.8 / 17.3 / 22.7 | 79 / 22 / 28 | 4.6 / 3.1 / 0.2 |
+| crc32 | 1 / 1 / 2 | 13.3 / 9.5 / 11.6 | 7 / 4 / 21 | 8.9 / 10.7 / 11.1 | 12 / 13 / 13 | 0.0 / 0.0 / 0.0 |
+| depthconv | 1 / 2 / 4 | 20.7 / 8.2 / 15.7 | 44 / 9 / 51 | 15.6 / 9.7 / 14.9 | 30 / 12 / 19 | 2.7 / 0.0 / 0.3 |
+| edn | 1 / 1 / 5 | 22.7 / 15.0 / 21.6 | 35 / 17 / 12 | 13.1 / 19.7 / 21.1 | 85 / 27 / 30 | 0.2 / 0.1 / 0.5 |
+| huffbench | 1 / 1 / 4 | 33.6 / 12.5 / 20.8 | 34 / 14 / 15 | 17.3 / 12.8 / 17.2 | 26 / 23 / 23 | 3.4 / 3.8 / 1.9 |
+| matmult-int | 1 / 2 / 3 | 53.9 / 13.5 / 19.1 | 26 / 9 / 6 | 36.2 / 13.0 / 17.6 | 72 / 27 / 27 | 0.3 / 0.1 / 0.1 |
+| md5sum | 1 / 2 / 4 | 37.8 / 16.7 / 28.3 | 33 / 10 / 33 | 20.5 / 14.8 / 23.2 | 28 / 19 / 30 | 0.0 / 1.9 / 0.3 |
+| nettle-aes | 1 / 1 / 1 | 54.6 / 21.0 / 23.1 | 155 / 8 / 19 | 39.0 / 22.5 / 23.3 | 72 / 26 / 29 | 0.3 / 0.0 / 0.1 |
+| nsichneu | 1 / 1 / 1 | 10.3 / 7.3 / 27.5 | 4 / 3 / 2 | 6.3 / 8.3 / 18.8 | 9 / 18 / 20 | 3.1 / 0.0 / 0.0 |
+| picojpeg | 2 / 2 / 3 | 24.5 / 14.9 / 16.8 | 40 / 23 / 23 | 16.1 / 15.5 / 18.2 | 43 / 25 / 28 | 3.2 / 3.4 / 1.4 |
+| qrduino | 1 / 1 / 2 | 35.1 / 15.1 / 22.3 | 38 / 14 / 18 | 19.4 / 14.6 / 20.0 | 68 / 25 / 29 | 3.5 / 2.2 / 0.6 |
+| sglib-combined | 2 / 2 / 3 | 44.6 / 15.9 / 22.9 | 34 / 13 / 16 | 18.3 / 14.3 / 16.1 | 36 / 22 / 24 | 5.2 / 3.1 / 2.2 |
+| slre | 2 / 2 / 2 | 136.8 / 12.9 / 15.6 | 75 / 33 / 40 | 65.2 / 13.7 / 14.9 | 90 / 23 / 24 | 10.2 / 8.1 / 10.2 |
+| statemate | 1 / 1 / 3 | 12.6 / 6.5 / 20.0 | 5 / 4 / 39 | 9.9 / 7.0 / 14.7 | 38 / 18 / 21 | 1.7 / 2.1 / 1.8 |
+| tarfind | 1 / 3 / 3 | 26.8 / 20.8 / 25.8 | 24 / 6 / 7 | 15.7 / 14.7 / 17.3 | 20 / 17 / 19 | 0.4 / 0.1 / 0.7 |
+| ud | 1 / 1 / 5 | 28.5 / 12.1 / 28.7 | 42 / 18 / 38 | 16.1 / 12.6 / 23.9 | 25 / 19 / 30 | 1.6 / 0.6 / 6.6 |
+| xgboost | 1 / 1 / 2 | 35.6 / 16.1 / 28.0 | 81 / 16 / 34 | 17.0 / 17.0 / 23.8 | 22 / 20 / 27 | 3.4 / 3.4 / 2.9 |
 
-### Control flow and memory: Scry against rv32imc (Scry / rv32imc)
+### Control flow and memory: Scry against RISC-V (Scry / rv64imc Cranelift / rv32imc llc)
 
 | benchmark | block length mean | median | calls | loads+stores | of which stack-relative | max stack bytes |
 |---|---:|---:|---:|---:|---:|---:|
-| aha-mont64 | 136.3 / 13.9 | 68 / 9 | 9469 / 9468 | 88935 / 70079 | 68114 / 49258 | 128 / 208 |
-| crc32 | 22.7 / 7.7 | 16 / 9 | 175284 / 175283 | 525485 / 525519 | 2 / 36 | 16 / 48 |
-| depthconv | 164.9 / 10.1 | 7 / 3 | 1649 / 1649 | 577346 / 587198 | 2 / 9854 | 16 / 64 |
-| edn | 34.1 / 10.0 | 22 / 7 | 256 / 256 | 977815 / 993543 | 2 / 15730 | 16 / 192 |
-| huffbench | 27.7 / 4.5 | 19 / 4 | 154 / 154 | 706326 / 706580 | 2 / 256 | 7696 / ? |
-| matmult-int | 41.3 / 12.6 | 22 / 6 | 90 / 90 | 612003 / 668557 | 2 / 56556 | 16 / 144 |
-| md5sum | 23.5 / 6.8 | 19 / 4 | 545 / 477 | 481003 / 483252 | 2 / 2050 | 16 / 144 |
-| nettle-aes | 158.1 / 45.1 | 34 / 33 | 394 / 394 | 852569 / 856325 | 618 / 4374 | 32 / 160 |
-| nsichneu | 17.9 / 2.6 | 18 / 3 | 9 / 9 | 1231786 / 1231802 | 2 / 18 | 16 / 48 |
-| picojpeg | 36.7 / 9.4 | 27 / 8 | 8316 / 8322 | 795641 / 956671 | 14 / 159790 | 48 / 320 |
-| qrduino | 31.7 / 6.7 | 23 / 5 | 2657 / 2651 | 667597 / 668793 | 2 / 952 | 16 / 144 |
-| sglib-combined | 25.0 / 4.1 | 20 / 3 | 33579 / 33578 | 814540 / 996684 | 38948 / 227812 | 1616 / 1312 |
-| slre | 28.1 / 4.3 | 23 / 3 | 35109 / 34640 | 262318 / 979566 | 57100 / 785931 | 2544 / 3008 |
-| statemate | 30.0 / 7.5 | 11 / 4 | 26657 / 29989 | 1369207 / 1609153 | 18 / 99999 | 80 / 160 |
-| tarfind | 14.9 / 4.8 | 19 / 4 | 37985 / 37984 | 555961 / 556544 | 2 / 585 | 16 / 112 |
-| ud | 37.9 / 8.0 | 24 / 7 | 1797 / 1796 | 568196 / 596834 | 1788 / 30430 | 416 / 512 |
-| xgboost | 42.1 / 6.1 | 41 / 6 | 265 / 264 | 1681558 / 1686200 | 2822 / 9768 | 64 / 128 |
+| aha-mont64 | 136.3 / 6.8 / 13.9 | 68 / 8 / 9 | 9469 / 9470 / 9468 | 88935 / 91837 / 70073 | 68114 / 81422 / 49258 | 128 / 320 / 208 |
+| crc32 | 22.7 / 12.0 / 7.7 | 16 / 15 / 9 | 175284 / 175285 / 175283 | 525485 / 525529 / 350415 | 2 / 46 / 36 | 16 / 112 / 48 |
+| depthconv | 164.9 / 20.2 / 10.1 | 7 / 7 / 3 | 1649 / 1650 / 1649 | 577346 / 577374 / 587196 | 2 / 30 / 9854 | 16 / 80 / 64 |
+| edn | 34.1 / 16.4 / 10.0 | 22 / 17 / 7 | 256 / 257 / 256 | 977815 / 994241 / 993540 | 2 / 14828 / 15730 | 16 / 320 / 192 |
+| huffbench | 27.7 / 5.7 / 4.5 | 19 / 4 / 4 | 154 / 155 / 154 | 706326 / 772300 / 706544 | 2 / 96 / 256 | 7696 / ? / ? |
+| matmult-int | 41.3 / 10.4 / 12.6 | 22 / 6 / 6 | 90 / 91 / 90 | 612003 / 1385237 / 668557 | 2 / 514036 / 56556 | 16 / 336 / 144 |
+| md5sum | 23.5 / 6.0 / 6.8 | 19 / 4 / 4 | 545 / 546 / 477 | 481003 / 482383 / 482842 | 2 / 1382 / 2050 | 16 / 208 / 144 |
+| nettle-aes | 158.1 / 56.4 / 45.1 | 34 / 12 / 33 | 394 / 395 / 394 | 852569 / 857687 / 856325 | 618 / 5736 / 4374 | 32 / 176 / 160 |
+| nsichneu | 17.9 / 6.9 / 2.6 | 18 / 7 / 3 | 9 / 10 / 9 | 1231786 / 1231850 / 1231787 | 2 / 66 / 18 | 16 / 160 / 48 |
+| picojpeg | 36.7 / 3.0 / 9.4 | 27 / 2 / 8 | 8316 / 8317 / 8322 | 795641 / 903171 / 935628 | 14 / 107568 / 159790 | 48 / 400 / 320 |
+| qrduino | 31.7 / 7.1 / 6.7 | 23 / 4 / 5 | 2657 / 2658 / 2651 | 667597 / 699071 / 665868 | 2 / 31314 / 952 | 16 / 352 / 144 |
+| sglib-combined | 25.0 / 5.5 / 4.1 | 20 / 4 / 3 | 33579 / 33580 / 33578 | 814540 / 1039566 / 964649 | 38948 / 262658 / 227812 | 1616 / ? / 1312 |
+| slre | 28.1 / 6.2 / 4.3 | 23 / 4 / 3 | 35109 / 35110 / 34640 | 262318 / 1119617 / 979566 | 57100 / 891233 / 785931 | 2544 / ? / 3008 |
+| statemate | 30.0 / 16.4 / 7.5 | 11 / 5 / 4 | 26657 / 26658 / 29989 | 1369207 / 1422535 / 1266041 | 18 / 79995 / 99999 | 80 / 192 / 160 |
+| tarfind | 14.9 / 3.8 / 4.8 | 19 / 4 / 4 | 37985 / 37986 / 37984 | 555961 / 556017 / 520213 | 2 / 58 / 585 | 16 / 144 / 112 |
+| ud | 37.9 / 12.4 / 8.0 | 24 / 8 / 7 | 1797 / 1798 / 1796 | 568196 / 600632 / 595046 | 1788 / 33988 / 30430 | 416 / 976 / 512 |
+| xgboost | 42.1 / 13.9 / 6.1 | 41 / 15 / 6 | 265 / 266 / 264 | 1681558 / 1685174 / 1686200 | 2822 / 8742 / 9768 | 64 / 208 / 128 |
 
 ? the RISC-V code sets `sp` from a register (a variable-length array), which the execution log cannot follow.
 
@@ -486,52 +512,66 @@ compiler uses them today, and it is where the leverage is.
   straight-line sequence over two halves that keeps more values alive for
   longer.
 
-#### Against rv32imc
+#### Against RISC-V
 
-* **Instructions.** Scry executes 6.4× as many instructions as rv32imc
-  over the suite, from 2.9× (statemate) to 10.3× (aha-mont64), 6.5× for
-  the median benchmark. The IR is the same, so the factor is the ISA and
-  the backend. The ALU instructions alone are 2.2× as many (sign and zero
-  extensions, address arithmetic, the handling of narrow types; 2.9× in
-  aha-mont64, whose 64-bit arithmetic the M extension does in a few
-  `mul`/`mulhu`), the control instructions 1.2×, and the rest are the
-  dataflow and constant instructions that RISC-V does not have. In
-  instruction bytes fetched (Scry's 16-bit instructions against rv32imc's
-  mix, 15–61 % of which is compressed at run time) the factor is 4.0×.
+* **The same translation on both ISAs.** Through llvm2clif and Cranelift,
+  Scry executes 3.7× as many instructions as rv64imc over the suite, from
+  2.0× (statemate) to 14.7× (aha-mont64, whose 64-bit arithmetic is native
+  on rv64 and lowered to pairs of 32-bit operations on Scry); the median
+  benchmark is at 3.6×. Against LLVM's rv32imc the factor is 6.4×, and the
+  two differ by 1.7×, which is how much more code Cranelift's riscv64
+  backend executes than LLVM's for the same IR (without its optimizer, as
+  in the Scry build). So of the 6.4× between Scry and a conventional
+  RISC-V compiler, about 3.7× is the ISA and the Scry backend and about
+  1.7× is the translation path and Cranelift. With Cranelift's optimizer on
+  the rv64imc code shrinks by 12 % over the suite (4.2× against Scry), but
+  not uniformly: nsichneu loses almost half, ud a quarter and aha-mont64 a
+  fifth, while tarfind, depthconv and nettle-aes gain instructions.
 
-* **Mix.** On rv32imc, constants are 0–27 % of the executed instructions
-  and register moves 0–18 % (statemate's 27 % are the same global
-  addresses that cost Scry 64 %, built with `lui`/`addi` pairs; md5sum and
-  tarfind move 16–18 %), so 67–100 % of the stream computes, accesses
-  memory or branches, against 13–35 % on Scry.
+* **Where the instructions go.** Against rv64imc through Cranelift, Scry
+  executes 1.5× the ALU instructions, 0.8× the control instructions
+  (Cranelift's unoptimized code runs 4.8 M unconditional jumps where
+  LLVM's runs 0.7 M, with the same 7 M conditional branches) and 0.85×
+  the loads and stores (Cranelift spills more: 2 % of its instructions are
+  stack-relative accesses, 16 % in slre, where Scry forwards instead).
+  Constants are a similar share on both, 24 % on Scry and 22 % on
+  rv64imc, since Cranelift without its optimizer materializes every
+  constant and address at each use as Scry does (`lui`/`auipc`+`addi`
+  pairs, `li`, constant-pool loads), where LLVM's code has 7 %. The
+  difference is the dataflow: 49 % of Scry's instructions forward values,
+  against 4 % register moves on rv64imc.
 
-* **Memory.** Both run the same loads and stores except for spills: where
-  RISC-V hardly spills (crc32, huffbench, nsichneu, qrduino, tarfind) the
-  counts agree to within a thousand (crc32: 525,485 against 525,519), and
-  in slre RISC-V makes 3.7× the memory accesses of Scry (980 k against
-  262 k), 27 % of its instructions being stack-relative loads and stores.
-  Over the suite RISC-V spends 2.4 % of its instructions spilling and
-  reloading its 31 registers; Scry spends 49 % forwarding values. The
-  register file bounds the live values: rv32imc keeps 11–24 register
-  values live on average and at most 30, where Scry keeps 6–65 and up to
-  90.
+* **Code size and fetch.** Scry's executables take 1.45× the bytes of the
+  rv64imc Cranelift build (2.3× its static instructions) and 2.7× those
+  of LLVM's rv32imc; Cranelift's riscv64 code is itself 1.9× LLVM's in
+  bytes. Weighted by execution, Scry fetches 2.3× the instruction bytes of
+  rv64imc (38 % of whose instructions are compressed) and 4.0× those of
+  rv32imc.
 
-* **Lifetimes.** Measured in instructions, the medians are alike (1–4 on
-  Scry, 1–5 on rv32imc); the means are 12–29 on rv32imc against 10–137 on
-  Scry and the 90th percentiles 2–51 against 4–172. Scry's are stretched
-  by its longer instruction stream and by the values it keeps in flight
-  where RISC-V would have spilled them.
+* **Values.** With the same translation, the median lifetime is 1 to 3
+  instructions on rv64imc as on Scry (1 to 4), the means 7 to 21 against
+  10 to 137 and the 90th percentiles 3 to 33 against 4 to 172; rv64imc
+  keeps 7 to 23 register values live on average and at most 27, Scry 6 to
+  65 and up to 90. Through LLVM (rv32imc) the figures are a little longer
+  (means 12 to 29, 11 to 24 live) because its code is denser. The
+  never-used shares are alike on all three (slre 8 to 10 %, most others
+  below 4 %), so the dead values come from the IR rather than from a
+  backend.
 
-* **Blocks and branches.** Branch, call and return counts agree (same IR),
-  so the executed blocks are 2.6–45 instructions long on rv32imc against
-  15–165 on Scry. Branches are taken 21–100 % of the time.
+* **Blocks and memory.** Branch, call and return counts agree (same IR),
+  and the executed blocks are 3 to 56 instructions long on rv64imc and 3
+  to 45 on rv32imc against 15 to 165 on Scry. Loads and stores match where
+  nothing spills (crc32: 525,485 on Scry, 525,529 on rv64imc, 525,519 on
+  rv32imc); the Cranelift build spills most in matmult-int (514 k
+  stack-relative accesses, 2.3× Scry's memory traffic) and slre (891 k,
+  4.3×).
 
-* **Code size.** Linked and relaxed, the Scry executables take 2.73× the
-  bytes of rv32imc and 2.06× the bytes of rv32im, and 4.1× the static
-  instructions of rv32imc (124 k against 30 k, 30–67 % of them
-  compressed). The small kernels are smaller than rv32imc (crc32 0.49×,
-  depthconv 0.68×, xgboost 0.73×); nsichneu (4.8×) and slre (4.5×) are the
-  largest, with far jumps and three-byte addresses.
+* **Against LLVM's rv32imc** specifically: 67 to 100 % of its instructions
+  compute, access memory or branch (constants 0 to 27 %, register moves 0
+  to 18 %); Scry executes 2.2× its ALU instructions and 1.2× its control
+  instructions; its small kernels are smaller than Scry's (crc32 0.49×,
+  depthconv 0.68×, xgboost 0.73×) and nsichneu (4.8×) and slre (4.5×) the
+  largest, with far jumps and three-byte addresses on the Scry side.
 
 **Simulator speed.** scryer `b1737e6` runs about 80 k instructions per
 second with events streamed to a pipe (the flush per step dominates) and

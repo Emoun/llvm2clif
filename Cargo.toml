@@ -20,8 +20,9 @@ anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 env_logger = { version = "0.11", default-features = false }
 
-# Cranelift with the Scry backend, from the Scry project's wasmtime fork.
-cranelift-codegen = { git = "https://github.com/Scry-arch/rust-wasmtime.git", rev = "f9fa226eb1c2f5d50fb5d888d7435004e02e1040", features = ["scry"] }
+# Cranelift with the Scry backend, from the Scry project's wasmtime fork; the
+# riscv64 backend is built too, for comparing the ISAs (`--target riscv64`).
+cranelift-codegen = { git = "https://github.com/Scry-arch/rust-wasmtime.git", rev = "f9fa226eb1c2f5d50fb5d888d7435004e02e1040", features = ["scry", "riscv64"] }
 cranelift-frontend = { git = "https://github.com/Scry-arch/rust-wasmtime.git", rev = "f9fa226eb1c2f5d50fb5d888d7435004e02e1040" }
 cranelift-module = { git = "https://github.com/Scry-arch/rust-wasmtime.git", rev = "f9fa226eb1c2f5d50fb5d888d7435004e02e1040" }
 cranelift-object = { git = "https://github.com/Scry-arch/rust-wasmtime.git", rev = "f9fa226eb1c2f5d50fb5d888d7435004e02e1040" }

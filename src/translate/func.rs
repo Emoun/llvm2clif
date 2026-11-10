@@ -2,10 +2,10 @@
 
 use super::data::{alias_target, gep_const_offset};
 use super::types::{
-    container, is_native, mask, sign_extend_const, truncate_const, truncate_const128, Layout,
-    ScalarTy,
+    container, is_native, mask, sign_extend_const, truncate_const, truncate_const128, word_bits,
+    word_ty, Layout, ScalarTy,
 };
-use super::{ModuleCtx, TResult, TransError};
+use super::{ModuleCtx, TResult, Target, TransError};
 use crate::llvm::*;
 use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::immediates::{Imm64, Offset32};
@@ -89,7 +89,7 @@ pub(super) fn translate_alias(
         let fref = b.import_function(ExtFuncData {
             name: ExternalName::testcase(target.as_bytes()),
             signature: sigref,
-            colocated: false,
+            colocated: colocated(ctx),
             patchable: false,
         });
         let call = b.ins().call(fref, &args);
@@ -102,6 +102,15 @@ pub(super) fn translate_alias(
         verify(ctx, &func)?;
     }
     Ok(func)
+}
+
+/// Whether symbols are marked as "colocated" (within direct reach after
+/// linking). The programs are linked statically, so they always are; the
+/// riscv64 backend then addresses functions and globals PC-relatively
+/// (`auipc`+`jalr`/`addi`) instead of loading their absolute addresses from
+/// a constant pool in the code. The Scry backend is left as it was.
+fn colocated(ctx: &ModuleCtx) -> bool {
+    ctx.options.target == Target::Riscv64
 }
 
 pub(super) fn verify(ctx: &ModuleCtx, func: &ir::Function) -> TResult<()> {
@@ -298,15 +307,15 @@ impl<'a, 'm> FuncTranslator<'a, 'm> {
         self.b.ins().sextend(to, s)
     }
 
-    /// Converts a canonical `bits`-bit value to a sign-extended i32.
-    pub(super) fn sext_to_i32(&mut self, v: Value, bits: u32) -> Value {
-        self.emit_sextend(v, bits, types::I32)
+    /// Converts a canonical `bits`-bit value to a sign-extended word.
+    pub(super) fn sext_to_word(&mut self, v: Value, bits: u32) -> Value {
+        self.emit_sextend(v, bits, word_ty())
     }
 
     /// Converts a canonical `bits`-bit value to a zero-extended (or
-    /// truncated) i32.
-    pub(super) fn zext_to_i32(&mut self, v: Value, bits: u32) -> Value {
-        self.resize_unsigned(v, container(bits), types::I32)
+    /// truncated) word.
+    pub(super) fn zext_to_word(&mut self, v: Value, bits: u32) -> Value {
+        self.resize_unsigned(v, container(bits), word_ty())
     }
 
     /// Converts a value of Cranelift type `from` to `to` by zero extension or
@@ -348,7 +357,7 @@ impl<'a, 'm> FuncTranslator<'a, 'm> {
         let f = self.b.import_function(ExtFuncData {
             name: ExternalName::testcase(name.as_bytes()),
             signature: sigref,
-            colocated: false,
+            colocated: colocated(self.ctx),
             patchable: false,
         });
         self.funcrefs.insert(key, f);
@@ -363,7 +372,7 @@ impl<'a, 'm> FuncTranslator<'a, 'm> {
         let g = self.b.create_global_value(GlobalValueData::Symbol {
             name: ExternalName::testcase(name.as_bytes()),
             offset: Imm64::new(offset),
-            colocated: false,
+            colocated: colocated(self.ctx),
             tls: false,
         });
         self.gvs.insert(key, g);
@@ -375,15 +384,15 @@ impl<'a, 'm> FuncTranslator<'a, 'm> {
         if self.ctx.is_function_symbol(name) {
             let sig = function_signature_by_name(self.ctx, name)?;
             let fr = self.func_ref(name, &sig);
-            let mut v = self.b.ins().func_addr(types::I32, fr);
+            let mut v = self.b.ins().func_addr(word_ty(), fr);
             if offset != 0 {
-                let o = self.iconst(types::I32, offset as u64);
+                let o = self.iconst(word_ty(), offset as u64);
                 v = self.b.ins().iadd(v, o);
             }
             Ok(v)
         } else if self.ctx.globals.contains_key(name) || self.ctx.aliases.contains_key(name) {
             let gv = self.global_value(name, offset);
-            Ok(self.b.ins().symbol_value(types::I32, gv))
+            Ok(self.b.ins().symbol_value(word_ty(), gv))
         } else {
             Err(TransError::invalid(format!(
                 "reference to unknown global @{name}"
@@ -423,7 +432,7 @@ impl<'a, 'm> FuncTranslator<'a, 'm> {
             Operand::Local(id) => {
                 if let Some(ss) = self.allocas.get(id) {
                     let ss = *ss;
-                    return Ok(vec![self.b.ins().stack_addr(types::I32, ss, 0)]);
+                    return Ok(vec![self.b.ins().stack_addr(word_ty(), ss, 0)]);
                 }
                 match self.vals.get(id) {
                     Some(v) => Ok(v.clone()),
@@ -444,7 +453,7 @@ impl<'a, 'm> FuncTranslator<'a, 'm> {
         let v = self.use_op(op)?;
         if v.len() != 1 {
             return Err(TransError::invalid(format!(
-                "expected a scalar value of at most 32 bits, found one of {} parts",
+                "expected a scalar value of at most one word, found one of {} parts",
                 v.len()
             )));
         }
@@ -468,7 +477,7 @@ impl<'a, 'm> FuncTranslator<'a, 'm> {
                 }
                 Ok(vec![self.iconst(s.clif(), truncate_const(*v, s.bits()))])
             }
-            ConstKind::Null => Ok(vec![self.iconst(types::I32, 0)]),
+            ConstKind::Null => Ok(vec![self.iconst(word_ty(), 0)]),
             ConstKind::Undef | ConstKind::Poison | ConstKind::ZeroInit => {
                 let leaves = self.layout().flatten(&c.ty)?;
                 Ok(leaves.iter().map(|l| self.iconst(l.ty.clif(), 0)).collect())
@@ -507,7 +516,7 @@ impl<'a, 'm> FuncTranslator<'a, 'm> {
                 if offset == 0 {
                     return Ok(b);
                 }
-                let o = self.iconst(types::I32, offset as u64);
+                let o = self.iconst(word_ty(), offset as u64);
                 Ok(vec![self.b.ins().iadd(b[0], o)])
             }
             ConstKind::Cast(op, inner) => {
@@ -742,10 +751,10 @@ impl<'a, 'm> FuncTranslator<'a, 'm> {
             let mut out: Vec<Value> = w.iter().copied().take(kt).collect();
             if kt > w.len() {
                 let fill = if sext {
-                    let c31 = self.iconst(types::I32, 31);
+                    let c31 = self.iconst(word_ty(), (word_bits() - 1) as u64);
                     self.b.ins().sshr(w[w.len() - 1], c31)
                 } else {
-                    self.iconst(types::I32, 0)
+                    self.iconst(word_ty(), 0)
                 };
                 out.resize(kt, fill);
             }
@@ -754,7 +763,7 @@ impl<'a, 'm> FuncTranslator<'a, 'm> {
         if fs.is_wide() {
             // Wide to narrow (`trunc`, `inttoptr`): the lowest part.
             let w = self.wide_in(&vals, fb)?;
-            let r = self.resize_unsigned(w[0], types::I32, container(tb));
+            let r = self.resize_unsigned(w[0], word_ty(), container(tb));
             return Ok(vec![self.canon(r, tb)]);
         }
         // Narrow to wide (`zext`, `sext`, `ptrtoint`).
@@ -763,11 +772,11 @@ impl<'a, 'm> FuncTranslator<'a, 'm> {
         }
         let v = vals[0];
         let (lo, fill) = if sext {
-            let lo = self.sext_to_i32(v, fb);
-            let c31 = self.iconst(types::I32, 31);
+            let lo = self.sext_to_word(v, fb);
+            let c31 = self.iconst(word_ty(), (word_bits() - 1) as u64);
             (lo, self.b.ins().sshr(lo, c31))
         } else {
-            (self.zext_to_i32(v, fb), self.iconst(types::I32, 0))
+            (self.zext_to_word(v, fb), self.iconst(word_ty(), 0))
         };
         let mut out = vec![lo];
         out.resize(ts.parts(), fill);
@@ -787,6 +796,7 @@ impl<'a, 'm> FuncTranslator<'a, 'm> {
             1 => self.b.ins().load(types::I8, flags, ptr, off),
             2 => self.b.ins().load(types::I16, flags, ptr, off),
             4 => self.b.ins().load(types::I32, flags, ptr, off),
+            8 if word_bits() == 64 => self.b.ins().load(types::I64, flags, ptr, off),
             _ => {
                 // Odd sizes (3, 5, 6, 7 bytes): assemble from power-of-two
                 // sized loads, least significant part first.
@@ -828,6 +838,9 @@ impl<'a, 'm> FuncTranslator<'a, 'm> {
             1 | 2 | 4 => {
                 self.b.ins().store(flags, val, ptr, off);
             }
+            8 if word_bits() == 64 => {
+                self.b.ins().store(flags, val, ptr, off);
+            }
             _ => {
                 let c = sty.clif();
                 for (chunk_off, ty) in chunk_offsets(bytes as u64) {
@@ -859,14 +872,10 @@ impl<'a, 'm> FuncTranslator<'a, 'm> {
             return Ok(());
         }
         if size > INLINE_MEMOP_LIMIT {
-            let n = self.iconst(types::I32, size);
+            let w = word_ty();
+            let n = self.iconst(w, size);
             let name = if overlap { "memmove" } else { "memcpy" };
-            self.call_runtime(
-                name,
-                &[types::I32, types::I32, types::I32],
-                Some(types::I32),
-                &[dst, src, n],
-            );
+            self.call_runtime(name, &[w, w, w], Some(w), &[dst, src, n]);
             return Ok(());
         }
         let flags = self.memflags();
@@ -895,23 +904,27 @@ impl<'a, 'm> FuncTranslator<'a, 'm> {
             return Ok(());
         }
         if size > INLINE_MEMOP_LIMIT {
-            let n = self.iconst(types::I32, size);
-            let v32 = self.b.ins().uextend(types::I32, val);
-            self.call_runtime(
-                "memset",
-                &[types::I32, types::I32, types::I32],
-                Some(types::I32),
-                &[dst, v32, n],
-            );
+            let w = word_ty();
+            let n = self.iconst(w, size);
+            let vw = self.b.ins().uextend(w, val);
+            self.call_runtime("memset", &[w, w, w], Some(w), &[dst, vw, n]);
             return Ok(());
         }
         let flags = self.memflags();
-        let v32 = self.b.ins().uextend(types::I32, val);
-        let rep = self.iconst(types::I32, 0x0101_0101);
-        let pat32 = self.b.ins().imul(v32, rep);
+        // The byte repeated over a word, and over its 32- and 16-bit prefixes.
+        let w = word_ty();
+        let vw = self.b.ins().uextend(w, val);
+        let rep = self.iconst(w, 0x0101_0101_0101_0101);
+        let pat_w = self.b.ins().imul(vw, rep);
+        let pat32 = if w == types::I32 {
+            pat_w
+        } else {
+            self.b.ins().ireduce(types::I32, pat_w)
+        };
         let pat16 = self.b.ins().ireduce(types::I16, pat32);
         for (off, ty) in chunk_offsets(size) {
             let v = match ty {
+                types::I64 => pat_w,
                 types::I32 => pat32,
                 types::I16 => pat16,
                 _ => val,
@@ -932,7 +945,7 @@ impl<'a, 'm> FuncTranslator<'a, 'm> {
                 .map_err(|_| TransError::invalid("byval argument too large"))?,
             align.trailing_zeros() as u8,
         ));
-        let dst = self.b.ins().stack_addr(types::I32, ss, 0);
+        let dst = self.b.ins().stack_addr(word_ty(), ss, 0);
         self.emit_memcpy(dst, src, size, false)?;
         Ok(dst)
     }
@@ -994,12 +1007,31 @@ impl<'a, 'm> FuncTranslator<'a, 'm> {
 
         if range <= 2 * n + 4 && range <= 4096 {
             // Dense: jump table indexed by (v - min).
-            let v32 = self.zext_to_i32(v, bits);
+            let vw = self.zext_to_word(v, bits);
             let idx = if min == 0 {
-                v32
+                vw
             } else {
-                let m = self.iconst(types::I32, min);
-                self.b.ins().isub(v32, m)
+                let m = self.iconst(word_ty(), min);
+                self.b.ins().isub(vw, m)
+            };
+            // `br_table` takes a 32-bit index. On a 64-bit target the index
+            // is computed in 64 bits, so values beyond 32 bits have to take
+            // the default explicitly before it is truncated.
+            let idx = if word_ty() == types::I32 {
+                idx
+            } else {
+                let limit = self.iconst(word_ty(), range);
+                let in_range = self.b.ins().icmp(IntCC::UnsignedLessThan, idx, limit);
+                let table_block = self.b.create_block();
+                self.b.ins().brif(
+                    in_range,
+                    table_block,
+                    &[],
+                    self.blocks[default.0 as usize],
+                    &default_args,
+                );
+                self.b.switch_to_block(table_block);
+                self.b.ins().ireduce(types::I32, idx)
             };
             let mut target_calls: HashMap<BlockId, ir::BlockCall> = HashMap::new();
             let default_call = self
@@ -1373,20 +1405,20 @@ impl<'a, 'm> FuncTranslator<'a, 'm> {
                 op => {
                     let ity = self.scalar_of(&idx.ty)?;
                     let iv = if ity.is_wide() {
-                        // Addresses are 32 bits wide: only the lowest part
+                        // Addresses are one word wide: only the lowest part
                         // of a wide index matters.
                         self.use_wide(op, ity.bits())?[0]
                     } else {
                         let iv = self.use_scalar(op)?;
-                        self.sext_to_i32(iv, ity.bits())
+                        self.sext_to_word(iv, ity.bits())
                     };
                     let term = if stride == 1 {
                         iv
                     } else if stride.is_power_of_two() {
-                        let sh = self.iconst(types::I32, stride.trailing_zeros() as u64);
+                        let sh = self.iconst(word_ty(), stride.trailing_zeros() as u64);
                         self.b.ins().ishl(iv, sh)
                     } else {
-                        let s = self.iconst(types::I32, stride);
+                        let s = self.iconst(word_ty(), stride);
                         self.b.ins().imul(iv, s)
                     };
                     dyn_terms.push(term);
@@ -1398,7 +1430,7 @@ impl<'a, 'm> FuncTranslator<'a, 'm> {
             addr = self.b.ins().iadd(addr, t);
         }
         if const_off != 0 {
-            let o = self.iconst(types::I32, const_off as u64);
+            let o = self.iconst(word_ty(), const_off as u64);
             addr = self.b.ins().iadd(addr, o);
         }
         Ok(addr)
@@ -1566,10 +1598,17 @@ fn mem_offset(offset: i64) -> TResult<Offset32> {
         .map_err(|_| TransError::invalid("memory offset out of range"))
 }
 
-/// Splits `size` bytes into (offset, type) chunks of 4, 2 and 1 bytes.
+/// Splits `size` bytes into (offset, type) chunks of 8 (on a 64-bit
+/// target), 4, 2 and 1 bytes.
 fn chunk_offsets(size: u64) -> Vec<(u64, types::Type)> {
     let mut out = Vec::new();
     let mut off = 0;
+    if word_bits() == 64 {
+        while size - off >= 8 {
+            out.push((off, types::I64));
+            off += 8;
+        }
+    }
     while size - off >= 4 {
         out.push((off, types::I32));
         off += 4;

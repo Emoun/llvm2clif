@@ -189,7 +189,12 @@ scryer prog.elf --target=scry32-unknown-none-elf
 
 `llvm2clif` prints an error naming the function and source line when it meets
 something it cannot translate; `--skip-unsupported` turns that into a warning
-and drops the function. The `-flavor gnu` flag (which must come first) makes
+and drops the function. `--target riscv64` compiles the same translation with
+Cranelift's riscv64 backend instead (from IR produced for
+`riscv64-unknown-none-elf`, with 64-bit pointers and native `i64`), which
+`benchmarks/embench/metrics.py --rv64` uses to compare the two ISAs through
+the same compiler path; `--opt-level speed` turns Cranelift's own optimizer
+on (it is off by default, since the IR arrives optimized). The `-flavor gnu` flag (which must come first) makes
 wild read GNU ld options on every host; on macOS it would otherwise expect
 ld64-style ones.
 
@@ -291,8 +296,10 @@ and runs it on the simulator; `benchmarks/embench/README.md` lists what
 passes and what stops each of the others (a backend bug, compile time, or
 floating point), and has static and dynamic instruction metrics of the
 executables (`metrics.py`, built on `tools/scrymetrics`) side by side with
-the same metrics for rv32imc builds of the same optimized IR run on
-qemu (`metrics.py --rv32`).
+the same metrics for RISC-V builds of the same optimized IR run on qemu:
+rv64imc through llvm2clif and Cranelift's riscv64 backend, the same
+translation as for Scry (`metrics.py --rv64`), and rv32imc through LLVM's
+backend (`--rv32`).
 
 ## Why a hand-written LLVM IR parser?
 

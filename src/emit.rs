@@ -1,8 +1,8 @@
-//! Output of translated modules: textual CLIF, or a Scry ELF object file
-//! produced through Cranelift's Scry backend.
+//! Output of translated modules: textual CLIF, or an ELF object file
+//! produced through a Cranelift backend (Scry, or riscv64 for comparison).
 
 use crate::llvm;
-use crate::translate::{build_isa, ClifModule, DataInit};
+use crate::translate::{build_isa, ClifModule, DataInit, OptLevel, Target};
 use crate::translate::{ClifData, DataReloc};
 use anyhow::{anyhow, bail, Context as _};
 use cranelift_codegen::ir::{
@@ -35,6 +35,8 @@ pub fn module_from_clif(text: &str) -> anyhow::Result<ClifModule> {
         externals: Vec::new(),
         skipped: Vec::new(),
         function_names: Vec::new(),
+        target: Target::Scry32,
+        opt_level: OptLevel::None,
     };
     for f in funcs {
         let name = match &f.name {
@@ -375,17 +377,24 @@ fn bind_symbols(
     Ok(())
 }
 
-/// Compiles every function for Scry and renders the backend's disassembly
-/// (the machine instructions, with symbolic references unresolved).
+/// Compiles every function for the module's target and renders the
+/// backend's disassembly (the machine instructions, with symbolic references
+/// unresolved).
 pub fn assembly_text(m: &ClifModule) -> anyhow::Result<String> {
-    let isa = build_isa().map_err(|e| anyhow!(e))?;
+    let isa = build_isa(m.target, m.opt_level).map_err(|e| anyhow!(e))?;
     let mut out = String::new();
     for f in &m.functions {
         let mut ctx = Context::for_function(f.func.clone());
         ctx.set_disasm(true);
         let mut plane = cranelift_codegen::control::ControlPlane::default();
-        ctx.compile(&*isa, &mut plane)
-            .map_err(|e| anyhow!("compiling function `{}` for Scry: {}", f.name, e.inner))?;
+        ctx.compile(&*isa, &mut plane).map_err(|e| {
+            anyhow!(
+                "compiling function `{}` for {}: {}",
+                f.name,
+                m.target,
+                e.inner
+            )
+        })?;
         let compiled = ctx.compiled_code().expect("compiled");
         let _ = writeln!(
             out,
@@ -402,10 +411,10 @@ pub fn assembly_text(m: &ClifModule) -> anyhow::Result<String> {
     Ok(out)
 }
 
-/// Compiles the module for Scry and returns the bytes of an ELF relocatable
-/// object file.
+/// Compiles the module for its target and returns the bytes of an ELF
+/// relocatable object file.
 pub fn object_file(m: &ClifModule, module_name: &str) -> anyhow::Result<Vec<u8>> {
-    let isa = build_isa().map_err(|e| anyhow!(e))?;
+    let isa = build_isa(m.target, m.opt_level).map_err(|e| anyhow!(e))?;
     let mut builder =
         ObjectBuilder::new(isa, module_name, cranelift_module::default_libcall_names())?;
     // One section per function and data object lets the linker discard
@@ -489,7 +498,7 @@ pub fn object_file(m: &ClifModule, module_name: &str) -> anyhow::Result<Vec<u8>>
         }
         let mut ctx = Context::for_function(func);
         obj.define_function(func_ids[&f.name], &mut ctx)
-            .with_context(|| format!("compiling function `{}` for Scry", f.name))?;
+            .with_context(|| format!("compiling function `{}` for {}", f.name, m.target))?;
     }
 
     let product = obj.finish();

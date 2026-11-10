@@ -10,13 +10,17 @@ Markdown tables; --tables-only re-reads existing metrics.json files.
 With --rv32, also compiles each benchmark for rv32imc (and rv32im, for its code
 size) through the same pipeline as scry-cc (clang -> opt -O2 -> llc), runs it on
 qemu-riscv32 with its execution log piped into `scrymetrics rv32`, writes
-<out>/<bench>/rv32imc.json and prints comparison tables. --skip-scry leaves the
-Scry passes out (their metrics.json files are re-read).
+<out>/<bench>/rv32imc.json and prints comparison tables. With --rv64, compiles
+each benchmark for rv64imc through llvm2clif and Cranelift's riscv64 backend
+(the same translation as for Scry, from 64-bit IR), with and without Cranelift's
+optimizer, runs it on qemu-riscv64 and writes <out>/<bench>/rv64cl.json.
+--skip-scry leaves the Scry passes out (their metrics.json files are re-read).
 
-Usage: python3 benchmarks/embench/metrics.py [--out benchmarks/embench/out] [--jobs 3] [--rv32]
+Usage: python3 benchmarks/embench/metrics.py [--out benchmarks/embench/out] [--jobs 3] [--rv32] [--rv64]
 Needs tools/scrymetrics built (cargo build --release in tools/scrymetrics); the
-RISC-V part needs clang with the RISC-V target, opt, llc, ld.lld and qemu-riscv32
-(SCRY_CLANG, SCRY_OPT, SCRY_LLC, SCRY_LLD, SCRY_QEMU name them).
+RISC-V parts need clang with the RISC-V target, opt, llc, ld.lld, qemu-riscv32
+and qemu-riscv64 (SCRY_CLANG, SCRY_OPT, SCRY_LLC, SCRY_LLD, SCRY_QEMU, SCRY_QEMU64
+name them) and, for rv64, the llvm2clif binary (SCRY_LLVM2CLIF).
 """
 import argparse, json, os, shutil, statistics, struct, subprocess, sys, tempfile
 from concurrent.futures import ThreadPoolExecutor
@@ -75,42 +79,74 @@ def text_bytes(elf):
 RV_FRONT = ["-O2", "-S", "-emit-llvm", "-Xclang", "-disable-llvm-passes", "-fsigned-char", "-fno-vectorize", "-fno-slp-vectorize", "-g0"]
 
 
-def build_rv32(a, bench, march):
+def build_riscv(a, bench, march, backend, elf):
     """Compiles the benchmark for RISC-V the way scry-cc compiles it for Scry (same
-    sources, runtime, flags and `opt -O2` pipeline), with llc as the backend, and
-    links it with ld.lld for qemu-riscv32; returns the ELF path."""
+    sources, runtime, flags and `opt -O2` pipeline) and links it with ld.lld for
+    qemu's user mode. `backend` is "llc" (LLVM's RISC-V backend) or "cranelift"
+    (llvm2clif and Cranelift's riscv64 backend, the Scry translation); for the
+    latter, `march` is rv64imc and `a.rv64_opt_level` selects Cranelift's
+    optimization level."""
     repo = HERE / "embench-iot"
     d = Path(a.out) / bench
     srcs = sorted((repo / "src" / bench).glob("*.c")) + [repo / "support/main.c", repo / "support/beebsc.c", HERE / "boardsupport.c"]
     cflags, heap = scry_cc_flags(d)
-    target = ["--target=riscv32-unknown-none-elf", f"-march={march}", "-mabi=ilp32"]
+    rv64 = march.startswith("rv64")
+    target = [f"--target=riscv{64 if rv64 else 32}-unknown-none-elf", f"-march={march}", "-mabi=lp64" if rv64 else "-mabi=ilp32"]
     inc = ["-isystem", str(ROOT / "runtime/include"), f"-I{repo / 'support'}", f"-I{HERE / 'include'}"]
-    tmp = Path(tempfile.mkdtemp(prefix=f"{bench}-{march}-"))
+    tmp = Path(tempfile.mkdtemp(prefix=f"{bench}-{march}-{backend}-"))
     try:
         objs = []
         for src, extra in [(c, cflags) for c in srcs] + [(ROOT / "runtime/scryrt.c", ["-fno-builtin", f"-DSCRY_HEAP_SIZE={heap}"])]:
             pre, ll, obj = tmp / f"{src.stem}.pre.ll", tmp / f"{src.stem}.ll", tmp / f"{src.stem}.o"
             run([a.clang, *target, *RV_FRONT, *inc, *extra, "-o", pre, src])
             run([a.opt, "-O2", "-S", "-o", ll, pre])
-            run([a.llc, "-O2", "-march=riscv32", "-mattr=+m,+c" if march == "rv32imc" else "-mattr=+m", "-filetype=obj", "-o", obj, ll])
+            if backend == "llc":
+                run([a.llc, "-O2", f"-march=riscv{64 if rv64 else 32}", "-mattr=+m,+c" if march.endswith("c") else "-mattr=+m", "-filetype=obj", "-o", obj, ll])
+            else:
+                run([a.llvm2clif, "--target", "riscv64", "--opt-level", a.rv64_opt_level, "-o", obj, ll])
             objs.append(obj)
+        # Cranelift's riscv64 objects carry the double-float ABI flag (the
+        # backend insists on the G extensions, though the code is integer
+        # only), and the linker wants the start-up object to match.
         crt = tmp / "crt0.o"
-        run([a.clang, *target, "-c", "-o", crt, HERE / "rv32_crt0.S"])
-        elf = d / f"{march}.elf"
+        crt_target = ["--target=riscv64-unknown-none-elf", "-march=rv64imafdc", "-mabi=lp64d"] if backend == "cranelift" else target
+        run([a.clang, *crt_target, "-c", "-o", crt, HERE / "riscv_crt0.S"])
         run([a.lld, "-o", elf, crt, *objs])
     finally:
         shutil.rmtree(tmp)
     return elf
 
 
+def measure_riscv(a, elf, qemu, pass_name):
+    """Runs an ELF on qemu with the execution log piped into the given pass of
+    scrymetrics; returns (exit code, metrics)."""
+    sim = subprocess.Popen([qemu, "-d", "exec,in_asm,nochain", str(elf)], stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    dyn = subprocess.run([a.scrymetrics, pass_name], stdin=sim.stderr, capture_output=True, text=True, timeout=a.timeout)
+    return sim.wait(), json.loads(dyn.stdout)
+
+
+def measure_rv64(a, bench):
+    """rv64imc through llvm2clif and Cranelift, once without and once with
+    Cranelift's optimizer (the comparison with Scry uses the former)."""
+    d = Path(a.out) / bench
+    result = {"bench": bench}
+    for level, key in [("none", "none"), ("speed", "speed")]:
+        a.rv64_opt_level = level
+        elf = build_riscv(a, bench, "rv64imc", "cranelift", d / f"rv64cl_{key}.elf")
+        static = json.loads(run([a.scrymetrics, "rv64-static", elf]).stdout)
+        code, dyn = measure_riscv(a, elf, a.qemu64, "rv64")
+        result[key] = {"exit_code": code, "text_bytes": static["text_bytes"], "static": static, "dynamic": dyn}
+    (d / "rv64cl.json").write_text(json.dumps(result, indent=1))
+    return result
+
+
 def measure_rv32(a, bench):
     d = Path(a.out) / bench
-    static = {march: json.loads(run([a.scrymetrics, "rv32-static", build_rv32(a, bench, march)]).stdout) for march in ("rv32im", "rv32imc")}
-    sim = subprocess.Popen([a.qemu, "-d", "exec,in_asm,nochain", str(d / "rv32imc.elf")],
-                           stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
-    dyn = subprocess.run([a.scrymetrics, "rv32"], stdin=sim.stderr, capture_output=True, text=True, timeout=a.timeout)
-    result = {"bench": bench, "exit_code": sim.wait(), "text_bytes": {m: st["text_bytes"] for m, st in static.items()},
-              "static": static, "dynamic": json.loads(dyn.stdout)}
+    static = {march: json.loads(run([a.scrymetrics, "rv32-static", build_riscv(a, bench, march, "llc", d / f"{march}.elf")]).stdout)
+              for march in ("rv32im", "rv32imc")}
+    code, dyn = measure_riscv(a, d / "rv32imc.elf", a.qemu, "rv32")
+    result = {"bench": bench, "exit_code": code, "text_bytes": {m: st["text_bytes"] for m, st in static.items()},
+              "static": static, "dynamic": dyn}
     (d / "rv32imc.json").write_text(json.dumps(result, indent=1))
     return result
 
@@ -121,6 +157,8 @@ def load(a, bench):
     r = json.loads((d / "metrics.json").read_text()) if (d / "metrics.json").exists() else {"bench": bench}
     if (d / "rv32imc.json").exists():
         r["rv32"] = json.loads((d / "rv32imc.json").read_text())
+    if (d / "rv64cl.json").exists():
+        r["rv64"] = json.loads((d / "rv64cl.json").read_text())
     return r
 
 
@@ -129,6 +167,8 @@ def process(a, bench):
         measure(a, bench)
     if a.rv32 and not a.tables_only:
         measure_rv32(a, bench)
+    if a.rv64 and not a.tables_only:
+        measure_rv64(a, bench)
     return load(a, bench)
 
 
@@ -145,65 +185,119 @@ def ratio(x, y):
     return f"{x / y:.2f}" if y else "  -  "
 
 
+def variants(r):
+    """The RISC-V results of a benchmark: (label, exit code, text bytes, static, dynamic)."""
+    out = []
+    if r.get("rv64"):
+        v = r["rv64"]["none"]
+        out.append(("rv64imc Cranelift", v["exit_code"], v["text_bytes"], v["static"], v["dynamic"]))
+    if r.get("rv32"):
+        v = r["rv32"]
+        out.append(("rv32imc llc", v["exit_code"], v["text_bytes"]["rv32imc"], v["static"]["rv32imc"], v["dynamic"]))
+    return out
+
+
 def rv_tables(results):
-    rs = [r for r in results if r.get("rv32") and r.get("dynamic")]
+    rs = [r for r in results if r.get("dynamic") and (r.get("rv32") or r.get("rv64"))]
     if not rs:
         return []
-    out = ["\n### Scry against rv32imc: instructions\n",
-           "| benchmark | executed on Scry | executed on rv32imc | ratio | instruction bytes fetched, ratio | static Scry | static rv32imc | ratio |",
-           "|---|---:|---:|---:|---:|---:|---:|---:|"]
-    tot = [0] * 6
+    labels = [v[0] for v in variants(rs[0])]
+    both = len(labels) == 2
+    slash = " / ".join(labels)
+    out = ["\n### Scry against RISC-V: instructions executed\n"]
+    head = "| benchmark | Scry |"
+    for l in labels:
+        head += f" {l} | Scry ratio |"
+    if any(r.get("rv64") for r in rs):
+        head += " rv64imc Cranelift, optimizer on | Scry ratio |"
+    out += [head, "|---|---:|" + "---:|" * (head.count("|") - 3)]
+    tot = {}
     for r in rs:
-        s = r["dynamic"]["steps"]; v = r["rv32"]["dynamic"]["instructions"]
-        vb = 4 * v - 2 * r["rv32"]["dynamic"]["forms"]["compressed"]  # 2 bytes per compressed instruction, 4 otherwise
-        ss = r["static"]["instructions"]; vs = r["rv32"]["static"]["rv32imc"]["instructions"]
-        mark = "†" if r["rv32"]["exit_code"] else ""
-        out.append(f"| {name(r)}{mark} | {s} | {v} | {ratio(s, v)} | {ratio(2 * s, vb)} | {ss} | {vs} | {ratio(ss, vs)} |")
-        for i, x in enumerate((s, v, vb, ss, vs)):
-            tot[i] += x
-    out.append(f"| **total** | **{tot[0]}** | **{tot[1]}** | **{ratio(tot[0], tot[1])}** | **{ratio(2 * tot[0], tot[2])}** | **{tot[3]}** | **{tot[4]}** | **{ratio(tot[3], tot[4])}** |")
-    out.append("\n### Code size against rv32imc and rv32im\n")
-    out.append("| benchmark | Scry bytes | rv32imc bytes | ratio | rv32im bytes | ratio | rv32imc compressed % |")
-    out.append("|---|---:|---:|---:|---:|---:|---:|")
-    tot = [0] * 3
+        s = r["dynamic"]["steps"]; tot["scry"] = tot.get("scry", 0) + s
+        row = f"| {name(r)} | {s} |"
+        for label, code, _, _, dyn in variants(r):
+            v = dyn["instructions"]; tot[label] = tot.get(label, 0) + v
+            row += f" {v}{'†' if code else ''} | {ratio(s, v)} |"
+        if r.get("rv64"):
+            v = r["rv64"]["speed"]["dynamic"]["instructions"]; tot["speed"] = tot.get("speed", 0) + v
+            row += f" {v}{'†' if r['rv64']['speed']['exit_code'] else ''} | {ratio(s, v)} |"
+        out.append(row)
+    row = f"| **total** | **{tot['scry']}** |"
+    for l in labels:
+        row += f" **{tot[l]}** | **{ratio(tot['scry'], tot[l])}** |"
+    if "speed" in tot:
+        row += f" **{tot['speed']}** | **{ratio(tot['scry'], tot['speed'])}** |"
+    out.append(row)
+
+    out.append("\n### Code size against RISC-V\n")
+    head = "| benchmark | Scry bytes | static instructions |"
+    for l in labels:
+        head += f" {l} bytes | Scry ratio | static instructions | compressed % |"
+    if any(r.get("rv32") for r in rs):
+        head += " rv32im llc bytes | Scry ratio |"
+    out += [head, "|---|---:|---:|" + "---:|" * (head.count("|") - 4)]
+    tot = {}
     for r in rs:
-        sb = r["static"]["text_bytes"]; cb = r["rv32"]["text_bytes"]["rv32imc"]; ib = r["rv32"]["text_bytes"]["rv32im"]
-        st = r["rv32"]["static"]["rv32imc"]
-        out.append(f"| {r['bench']} | {sb} | {cb} | {ratio(sb, cb)} | {ib} | {ratio(sb, ib)} | {pct(st['compressed'], st['instructions'])} |")
-        for i, x in enumerate((sb, cb, ib)):
-            tot[i] += x
-    out.append(f"| **total** | **{tot[0]}** | **{tot[1]}** | **{ratio(tot[0], tot[1])}** | **{tot[2]}** | **{ratio(tot[0], tot[2])}** | |")
-    out.append("\n### rv32imc dynamic instruction mix\n")
-    out.append("| benchmark | instructions | alu % | constant % | move % | control % | memory % | other % | compressed % | branches taken % |")
-    out.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
+        sb = r["static"]["text_bytes"]; tot["scry"] = tot.get("scry", 0) + sb
+        row = f"| {r['bench']} | {sb} | {r['static']['instructions']} |"
+        for label, _, bytes_, st, _ in variants(r):
+            tot[label] = tot.get(label, 0) + bytes_
+            row += f" {bytes_} | {ratio(sb, bytes_)} | {st['instructions']} | {pct(st['compressed'], st['instructions']).strip()} |"
+        if r.get("rv32"):
+            ib = r["rv32"]["text_bytes"]["rv32im"]; tot["im"] = tot.get("im", 0) + ib
+            row += f" {ib} | {ratio(sb, ib)} |"
+        out.append(row)
+    row = f"| **total** | **{tot['scry']}** | |"
+    for l in labels:
+        row += f" **{tot[l]}** | **{ratio(tot['scry'], tot[l])}** | | |"
+    if "im" in tot:
+        row += f" **{tot['im']}** | **{ratio(tot['scry'], tot['im'])}** |"
+    out.append(row)
+
+    out.append(f"\n### RISC-V dynamic instruction mix ({slash})\n")
+    out.append("| benchmark | alu % | constant % | move % | control % | memory % | other % | compressed % | branches taken % |")
+    out.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|")
+    def cell(vals):
+        return " / ".join(vals)
     for r in rs:
-        d = r["rv32"]["dynamic"]; n = d["instructions"]; bc = d["by_category"]; fm = d["forms"]
-        other = sum(v for k, v in bc.items() if k not in ("alu", "constant", "move", "control", "memory"))
-        out.append(f"| {r['bench']} | {n} | " + " | ".join(pct(bc.get(c, 0), n) for c in ("alu", "constant", "move", "control", "memory"))
-                   + f" | {pct(other, n)} | {pct(fm['compressed'], n)} | {pct(fm['branches_taken'], fm['branches'])} |")
-    out.append("\n### Values: Scry operands against rv32imc register values (Scry / rv32imc)\n")
+        vs = variants(r)
+        cols = []
+        for c in ("alu", "constant", "move", "control", "memory"):
+            cols.append(cell(pct(d["by_category"].get(c, 0), d["instructions"]).strip() for _, _, _, _, d in vs))
+        cols.append(cell(pct(sum(x for k, x in d["by_category"].items() if k not in ("alu", "constant", "move", "control", "memory")), d["instructions"]).strip() for _, _, _, _, d in vs))
+        cols.append(cell(pct(d["forms"]["compressed"], d["instructions"]).strip() for _, _, _, _, d in vs))
+        cols.append(cell(pct(d["forms"]["branches_taken"], d["forms"]["branches"]).strip() for _, _, _, _, d in vs))
+        out.append(f"| {r['bench']} | " + " | ".join(cols) + " |")
+
+    out.append(f"\n### Values: Scry operands against RISC-V register values (Scry / {slash})\n")
     out.append("| benchmark | lifetime median | mean | p90 | live values mean | max | never used % |")
     out.append("|---|---:|---:|---:|---:|---:|---:|")
     for r in rs:
         so = r["dynamic"]["operands"]; sl = so["lifetime"]; sq = r["dynamic"]["occupancy"]
-        vo = r["rv32"]["dynamic"]["operands"]; vl = vo["lifetime"]; vq = r["rv32"]["dynamic"]["occupancy"]
-        out.append(f"| {name(r)} | {sl['median']} / {vl['median']} | {sl['mean']:.1f} / {vl['mean']:.1f} | {sl['p90']} / {vl['p90']} | "
-                   f"{sq['mean']:.1f} / {vq['mean']:.1f} | {sq['max']} / {vq['max']} | "
-                   f"{pct(so['discarded'], so['produced']).strip()} / {pct(vo['discarded'], vo['defined']).strip()} |")
-    out.append("\n### Control flow and memory: Scry against rv32imc (Scry / rv32imc)\n")
+        vs = [d for _, _, _, _, d in variants(r)]
+        out.append(f"| {name(r)} | " + cell([str(sl["median"])] + [str(d["operands"]["lifetime"]["median"]) for d in vs])
+                   + " | " + cell([f"{sl['mean']:.1f}"] + [f"{d['operands']['lifetime']['mean']:.1f}" for d in vs])
+                   + " | " + cell([str(sl["p90"])] + [str(d["operands"]["lifetime"]["p90"]) for d in vs])
+                   + " | " + cell([f"{sq['mean']:.1f}"] + [f"{d['occupancy']['mean']:.1f}" for d in vs])
+                   + " | " + cell([str(sq["max"])] + [str(d["occupancy"]["max"]) for d in vs])
+                   + " | " + cell([pct(so["discarded"], so["produced"]).strip()] + [pct(d["operands"]["discarded"], d["operands"]["defined"]).strip() for d in vs]) + " |")
+
+    out.append(f"\n### Control flow and memory: Scry against RISC-V (Scry / {slash})\n")
     out.append("| benchmark | block length mean | median | calls | loads+stores | of which stack-relative | max stack bytes |")
     out.append("|---|---:|---:|---:|---:|---:|---:|")
     for r in rs:
-        sd = r["dynamic"]; vd = r["rv32"]["dynamic"]; sm = sd["memory"]; vm = vd["memory"]
-        s_acc = sm["loads"] + sm["stores"] + sm["stack_loads"] + sm["stack_stores"]; v_acc = vm["loads"] + vm["stores"]
-        out.append(f"| {name(r)} | {sd['blocks']['mean']:.1f} / {vd['blocks']['mean']:.1f} | {sd['blocks']['median']} / {vd['blocks']['median']} | "
-                   f"{sd['control'].get('Call', {}).get('count', 0)} / {vd['forms']['calls']} | "
-                   f"{s_acc} / {v_acc} | "
-                   f"{sm['stack_loads'] + sm['stack_stores']} / {vm['stack_loads'] + vm['stack_stores']} | "
-                   f"{sd['stack']['max_depth_bytes']} / {vd['stack']['max_depth_bytes'] if vd['stack']['known'] else '?'} |")
-    if any(r["rv32"]["exit_code"] for r in rs):
-        out.append("\n† the rv32imc build did not return 0 from `main` (its verification failed).")
-    if any(not r["rv32"]["dynamic"]["stack"]["known"] for r in rs):
+        sd = r["dynamic"]; sm = sd["memory"]
+        vs = [d for _, _, _, _, d in variants(r)]
+        s_acc = sm["loads"] + sm["stores"] + sm["stack_loads"] + sm["stack_stores"]
+        out.append(f"| {name(r)} | " + cell([f"{sd['blocks']['mean']:.1f}"] + [f"{d['blocks']['mean']:.1f}" for d in vs])
+                   + " | " + cell([str(sd["blocks"]["median"])] + [str(d["blocks"]["median"]) for d in vs])
+                   + " | " + cell([str(sd["control"].get("Call", {}).get("count", 0))] + [str(d["forms"]["calls"]) for d in vs])
+                   + " | " + cell([str(s_acc)] + [str(d["memory"]["loads"] + d["memory"]["stores"]) for d in vs])
+                   + " | " + cell([str(sm["stack_loads"] + sm["stack_stores"])] + [str(d["memory"]["stack_loads"] + d["memory"]["stack_stores"]) for d in vs])
+                   + " | " + cell([str(sd["stack"]["max_depth_bytes"])] + [str(d["stack"]["max_depth_bytes"]) if d["stack"]["known"] else "?" for d in vs]) + " |")
+    if any(code for r in rs for _, code, _, _, _ in variants(r)) or any(r.get("rv64") and r["rv64"]["speed"]["exit_code"] for r in rs):
+        out.append("\n† the RISC-V build did not return 0 from `main` (its verification failed).")
+    if any(not d["stack"]["known"] for r in rs for _, _, _, _, d in variants(r)):
         out.append("\n? the RISC-V code sets `sp` from a register (a variable-length array), which the execution log cannot follow.")
     return out
 
@@ -269,9 +363,11 @@ def main():
     ap.add_argument("--timeout", type=float, default=7200)
     ap.add_argument("--only", default="")
     ap.add_argument("--tables-only", action="store_true")
-    ap.add_argument("--rv32", action="store_true", help="also build, run and measure rv32imc versions")
+    ap.add_argument("--rv32", action="store_true", help="also build, run and measure rv32imc versions (llc)")
+    ap.add_argument("--rv64", action="store_true", help="also build, run and measure rv64imc versions (llvm2clif and Cranelift)")
     ap.add_argument("--skip-scry", action="store_true", help="do not rerun the Scry passes")
-    for tool, default in [("clang", "clang"), ("opt", "opt"), ("llc", "llc"), ("lld", "ld.lld"), ("qemu", "qemu-riscv32")]:
+    for tool, default in [("clang", "clang"), ("opt", "opt"), ("llc", "llc"), ("lld", "ld.lld"), ("qemu", "qemu-riscv32"),
+                          ("qemu64", "qemu-riscv64"), ("llvm2clif", str(ROOT / "target/release/llvm2clif"))]:
         ap.add_argument(f"--{tool}", default=os.environ.get(f"SCRY_{tool.upper()}", default))
     a = ap.parse_args()
     benches = sorted(p.parent.name for p in Path(a.out).glob("*/*.elf") if p.stem == p.parent.name)
@@ -286,6 +382,9 @@ def main():
                 line += f" scry {r['dynamic']['steps']:>12} instructions, returned {r['dynamic']['returned']}"
             if r.get("rv32"):
                 line += f"; rv32imc {r['rv32']['dynamic']['instructions']:>12} instructions, exit {r['rv32']['exit_code']}"
+            if r.get("rv64"):
+                v = r["rv64"]
+                line += f"; rv64imc {v['none']['dynamic']['instructions']:>12} instructions, exit {v['none']['exit_code']} (optimized {v['speed']['dynamic']['instructions']}, exit {v['speed']['exit_code']})"
             print(line, file=sys.stderr, flush=True)
     print(tables(results))
 

@@ -8,10 +8,10 @@
 //! mix, operand and control-flow lifetimes, queue occupancy, memory traffic
 //! and stack use.
 //!
-//! `scrymetrics rv32-static <elf>` and `scrymetrics rv32` do the same for
-//! RISC-V (RV32IMC) programs, the dynamic pass from a qemu execution log
-//! (`qemu-riscv32 -d exec,in_asm,nochain prog.elf`) on standard input, for
-//! comparison. All print one JSON object.
+//! `scrymetrics rv32-static <elf>` and `scrymetrics rv32` (and `rv64-static`,
+//! `rv64`) do the same for RISC-V programs, the dynamic pass from a qemu
+//! execution log (`qemu-riscv32 -d exec,in_asm,nochain prog.elf`) on standard
+//! input, for comparison. All print one JSON object.
 
 mod rv32;
 
@@ -448,9 +448,9 @@ fn main() {
             }
             let _ = writeln!(out, "{}", d.json());
         }
-        Some("rv32-static") => {
+        Some(cmd @ ("rv32-static" | "rv64-static")) => {
             for path in &args[1..] {
-                match rv32::run_static(path) {
+                match rv32::run_static(path, cmd == "rv64-static") {
                     Ok(json) => {
                         let _ = writeln!(out, "{json}");
                     }
@@ -461,10 +461,10 @@ fn main() {
                 }
             }
         }
-        Some("rv32") => {
+        Some(cmd @ ("rv32" | "rv64")) => {
             let stdin = io::stdin();
             let mut reader = io::BufReader::with_capacity(1 << 20, stdin.lock());
-            let mut r = rv32::Rv32::new();
+            let mut r = rv32::Rv32::new(cmd == "rv64");
             let mut line = String::new();
             loop {
                 line.clear();
@@ -483,8 +483,11 @@ fn main() {
         _ => {
             eprintln!("usage: scrymetrics static <elf>...");
             eprintln!("       scryer prog.elf --print-events | scrymetrics dynamic");
-            eprintln!("       scrymetrics rv32-static <elf>...");
+            eprintln!(
+                "       scrymetrics rv32-static <elf>...  |  scrymetrics rv64-static <elf>..."
+            );
             eprintln!("       qemu-riscv32 -d exec,in_asm,nochain prog.elf 2>&1 >/dev/null | scrymetrics rv32");
+            eprintln!("       qemu-riscv64 -d exec,in_asm,nochain prog.elf 2>&1 >/dev/null | scrymetrics rv64");
             std::process::exit(2);
         }
     }
