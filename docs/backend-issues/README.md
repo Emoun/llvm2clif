@@ -37,12 +37,13 @@ and `fad5e62`):
 | 12. type-analysis panic on a comparison result used through `sshr` | fixed in `f9fa226` |
 | 13. reference distance assignment does not converge | fixed in `f9fa226` |
 | 14. compile time explodes on nested loops with long-lived values | open |
+| 15. reference distance assignment does not terminate with the optimizer on | open |
 | compile time cubic in the block size | open |
 | simulator: 4 KiB stack pool | configurable since scryer `459c71b` (`--stack-buffer`) |
 | simulator: 64 KiB image | fixed in scryer `8059eee` (1 MiB, `--stack-base` since `459c71b`) |
 | simulator: event recording cost | fixed: streaming since `da24f0a`, nothing recorded when not printed since `b1737e6` |
 
-Issues 11 to 14 and the simulator limits were found by running
+Issues 11 to 15 and the simulator limits were found by running
 [Embench-IoT](../../benchmarks/embench/README.md) on the toolchain.
 
 ## 1. `echo.l` forwards every queued operand (wrong results)
@@ -545,3 +546,95 @@ name no program address (the end-to-end harness reports the panic line);
 `abort()` is reported as `Unsupported instruction: Trap` (the harness
 treats any simulator error as a failed case). After an error the printed
 log, if any, precedes the error banner.
+
+## Compile time: Embench data points
+
+The cubic compile time (above) determines which Embench benchmarks are
+practical. `aha-mont64` (`benchmark_body`: one basic block of 1006
+instructions after inlining and the 64-bit lowering) and `nettle-sha256`
+(`_nettle_sha256_compress`: a block of 837 instructions, the rounds being
+unrolled by hand in the source) did not finish compiling within two hours; the
+other benchmarks compile in 0.2 to 8.5 seconds, and `aha-mont64` compiles
+in 0.6 seconds when inlining is disabled.
+
+Block length alone does not explain `aha-mont64`: straight-line 64-bit
+code generated for the purpose (`a = a * b + i` chains, with or without a
+reused operand or a call in every step) compiles in these times,
+
+| instructions in the block | compile time |
+|---------------------------|--------------|
+| 227 | 0.25 s |
+| 451 | 1.8 s |
+| 675 | 5.8 s |
+| 899 | 14 s |
+| 1347 | 45 s |
+
+about cubic, so a 1006-instruction chain would take 20 seconds, not 30
+minutes. `montmul` from the same benchmark (311 instructions in one block)
+compiles in 0.44 seconds. What makes the inlined loop body two orders of
+magnitude slower is issue 14.
+
+## 14. Compile time explodes on nested loops with long-lived values
+
+**Reproducer:** `compile_time_nested_loops.clif` (14 blocks, 30
+instructions; not compiled within 15 minutes).
+
+The function is the skeleton of aha-mont64's `benchmark_body`: an outer
+loop around a middle loop around a chain of six self-looping blocks with
+six parameters each, a few values defined before the loops and consumed
+in the innermost block and after the middle loop, and the outer loop's
+latch (`brif v17, block13(v82), block2(v82, v16)`) testing and passing a
+*second* pair of zero constants defined in the entry block. The
+reduction was automatic (`tools/reduce_clif.py` and
+`tools/reduce_clif_blocks.py` with "compiles for more than 10 seconds" as
+the predicate), followed by ablation of the result:
+
+| change | compile time |
+|--------|--------------|
+| as is | > 900 s |
+| middle loop removed (block10 always goes to block11) | 0.16 s |
+| outer loop removed (block12 always returns) | 0.06 s |
+| self-loops removed (the chain is straight) | 0.04 s |
+| block9's or block11's arithmetic removed | 0.1 s |
+| latch uses v3 and v2 instead of v17 and v16 | 0.15 s |
+| latch uses v3 and v16, or v17 and v2 | 0.3 to 0.5 s |
+| v17 = 1 instead of 0 | > 60 s |
+
+So two extra values that are defined at the entry and live across every
+loop until the outermost latch turn a sub-second compile into one that
+does not finish, while either one alone is harmless. In `benchmark_body`
+the corresponding values are the loop bound and a counter.
+
+## 15. Reference distance assignment does not terminate with the optimizer on
+
+**Open** at `f9fa226`. With Cranelift's mid-end optimizer on
+(`scry-cc --cranelift-opt-level speed`, `llvm2clif --opt-level speed`),
+five of the seventeen Embench programs never finish compiling:
+`insert_ref_distances` (`cranelift/codegen/src/isa/scry/mod.rs`) scans a
+block, inserts one bridging `EchoLong` and starts the scan over, without
+bound. The same programs compile in seconds with the optimizer off, and
+the other twelve compile with it on (`benchmarks/embench/README.md` has
+their measurements).
+
+Observed with `RUST_LOG=cranelift_codegen::isa::scry=trace`, which prints
+the block at every rescan, on statemate's `FH_DU` (549 CLIF instructions
+after optimization, lowered to 503 instructions in 54 blocks): the block
+the pass restarts on holds 16 instructions at the first scan; after 25 s
+it had been rescanned 6,387 times and held 4,806 `EchoLong`s, one more at
+three rescans in four. `benchmark_body` of matmult-int, sglib-combined and
+ud behave the same (about 2,900, 2,700 and 3,150 echoes after 30 s), and
+picojpeg's `pjpeg_decode_mcu` (3,254 lowered instructions) is in the same
+pass after 30 s without having printed a rescan. Left running, four of the
+compiles were still in the pass after an hour, with under 110 MB of memory
+each: the block grows by one instruction per rescan and every rescan is a
+little slower. The optimizer's value numbering and code motion keep values
+alive across loops, the shapes of issue 14, and one bridge per rescan is
+the signature of issue 5, where a bridge was placed where its own
+reference was out of reach and bridged in turn; the cause was not traced
+further.
+
+To reproduce: `scry-cc --keep-temps -v` on statemate's build command (the
+first line of `compile.log` in `metrics.py`'s output directory) leaves
+`libstatemate.ll` in a temporary directory, and
+`llvm2clif --target scry32 --opt-level speed libstatemate.ll` does not
+return, while `--opt-level none` compiles it in under a second.

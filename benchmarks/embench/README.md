@@ -345,12 +345,12 @@ The tables below set the five builds against each other, one column each:
 Scry as built by `scry-cc` (Cranelift's optimizer off, the configuration of
 every other table), Scry with Cranelift's optimizer on
 (`scry-cc --cranelift-opt-level speed`, built and measured by
-`metrics.py --scry-speed`; a dash marks the five benchmarks whose build did
-not finish compiling within 30 minutes), rv64imc through llvm2clif and
-Cranelift without and with the optimizer, and rv32imc through LLVM. Where a
-metric has a static counterpart it follows the dynamic one after a middle
-dot. The Scry columns come from the same traces as the tables above; the
-distances are in instructions.
+`metrics.py --scry-speed`; a dash marks the five benchmarks whose build
+never finishes, issue 15 in `docs/backend-issues`), rv64imc through
+llvm2clif and Cranelift without and with the optimizer, and rv32imc through
+LLVM. Where a metric has a static counterpart it follows the dynamic one
+after a middle dot. The Scry columns come from the same traces as the
+tables above; the distances are in instructions.
 
 ### Instructions: executed / static
 
@@ -751,10 +751,11 @@ compiler uses them today, and it is where the leverage is.
 * **What the optimizer does to the Scry code.** `scry-cc --cranelift-opt-level
   speed` runs Cranelift's mid-end (value numbering, constant folding, code
   motion) on the CLIF before the Scry backend. Twelve of the seventeen
-  benchmarks compiled that way; matmult-int, picojpeg, sglib-combined,
-  statemate and ud did not finish compiling within 30 minutes (the
-  backend's compile-time problem, see `docs/backend-issues`; the base
-  builds of the same programs compile in seconds). Over the twelve, the
+  benchmarks compile that way; the builds of matmult-int, picojpeg,
+  sglib-combined, statemate and ud never finish, because the backend's
+  reference-distance pass keeps adding one bridging `echo.l` per rescan of
+  one block of each (issue 15 in `docs/backend-issues`; the base builds of
+  the same programs compile in seconds). Over the twelve, the
   optimized builds execute 4 % more instructions than the base builds
   (20 % more without aha-mont64), from half as many in aha-mont64, whose
   64-bit lowering is full of shared sub-expressions, to 2.6× as many in
