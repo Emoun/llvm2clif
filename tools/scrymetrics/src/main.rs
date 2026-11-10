@@ -112,6 +112,14 @@ fn run_static(path: &str) -> Result<String, String> {
     let mut by_category: BTreeMap<String, u64> = BTreeMap::new();
     let mut forms: BTreeMap<String, u64> = BTreeMap::new();
     let mut invalid = 0u64;
+    // Output references (the distance to the consumer, 1 = the next
+    // instruction) of all instructions, of loads and of echoes; the trigger
+    // offsets of jumps, calls and returns; the sizes of stack reservations.
+    let mut out_refs = Hist::default();
+    let mut load_refs = Hist::default();
+    let mut echo_refs = Hist::default();
+    let mut trigger = Hist::default();
+    let mut frames = Hist::default();
     for w in bytes.as_chunks::<2>().0 {
         let inst = scry_isa::Instruction::decode(u16::from_le_bytes(*w));
         use scry_isa::Instruction as I;
@@ -131,20 +139,39 @@ fn run_static(path: &str) -> Result<String, String> {
         if let Some(f) = form {
             *forms.entry(f.to_string()).or_default() += 1;
         }
+        for r in inst.out_refs() {
+            out_refs.add(r + 1);
+            match &inst {
+                I::Load(..) | I::LoadStack(..) => load_refs.add(r + 1),
+                I::Echo(..) | I::EchoLong(..) => echo_refs.add(r + 1),
+                _ => {}
+            }
+        }
+        match &inst {
+            I::Jump(_, trig) | I::Call(_, trig) => trigger.add(trig.value as usize),
+            I::StackRes(true, size, _) => frames.add(1usize << size.value),
+            _ => {}
+        }
         let m = inst.mnemonic();
         *by_mnemonic.entry(m.to_string()).or_default() += 1;
         *by_category.entry(category(m).to_string()).or_default() += 1;
     }
     let total: u64 = by_mnemonic.values().sum();
     Ok(format!(
-        "{{\"file\": \"{}\", \"text_bytes\": {}, \"instructions\": {}, \"invalid_words\": {}, \"by_category\": {}, \"by_mnemonic\": {}, \"forms\": {}}}",
+        "{{\"file\": \"{}\", \"text_bytes\": {}, \"instructions\": {}, \"invalid_words\": {}, \"by_category\": {}, \"by_mnemonic\": {}, \"forms\": {}, \
+         \"out_refs\": {}, \"load_refs\": {}, \"echo_refs\": {}, \"trigger\": {}, \"frames\": {}}}",
         path,
         bytes.len(),
         total,
         invalid,
         json_map(&by_category),
         json_map(&by_mnemonic),
-        json_map(&forms)
+        json_map(&forms),
+        out_refs.json(),
+        load_refs.json(),
+        echo_refs.json(),
+        trigger.json(),
+        frames.json()
     ))
 }
 
@@ -157,8 +184,11 @@ struct Dynamic {
     /// operand, `jmp 0, N`) against short ones (7-bit immediate), and long
     /// echoes against short ones.
     forms: BTreeMap<String, u64>,
-    // Operands: id -> (birth step, forwards so far)
-    live: HashMap<u64, (u64, u32)>,
+    /// Live operands by id.
+    live: HashMap<u64, Operand>,
+    /// Whether the instruction of the current step is a load (its produced
+    /// operands are counted in `load_lifetime`).
+    cur_is_load: bool,
     produced: u64,
     consumed: u64,
     discarded: u64,
@@ -167,7 +197,17 @@ struct Dynamic {
     lifetime: Hist,
     discarded_lifetime: Hist,
     forwards_per_operand: Hist,
+    /// Instructions from a value's production to its first forward or
+    /// consumption (the reach of the producer's output reference).
+    first_hop: Hist,
+    /// Lifetime (production to consumption) of values produced by loads.
+    load_lifetime: Hist,
+    /// First hop of values produced by loads.
+    load_first_hop: Hist,
     occupancy: Hist,
+    /// Bytes reserved on the stack by `rsrv`, and the number of reservations.
+    stack_reserved: u64,
+    reservations: u64,
     // Control: id -> (kind, issue step)
     control_live: HashMap<u64, (String, u64)>,
     control_lifetime: BTreeMap<String, Hist>,
@@ -186,6 +226,15 @@ struct Dynamic {
     returned: String,
     /// The simulator stopped at its instruction/time limit (`----------  Timeout  ----------`).
     timed_out: bool,
+}
+
+/// A live operand: when it was produced, how often it was forwarded, whether
+/// a load produced it, and the step of its first forward or consumption.
+struct Operand {
+    birth: u64,
+    forwards: u32,
+    load: bool,
+    first_hop: Option<u64>,
 }
 
 fn parse_hex(s: &str) -> Option<u64> {
@@ -263,6 +312,17 @@ impl Dynamic {
                 }
                 let cat = category(m);
                 *self.by_category.entry(cat.to_string()).or_default() += 1;
+                self.cur_is_load = m == "ld";
+                if m == "rsrv" {
+                    // "rsrv 16" or "rsrv 16, base"
+                    let n: u64 = text
+                        .split_whitespace()
+                        .nth(1)
+                        .and_then(|a| a.trim_end_matches(',').parse().ok())
+                        .unwrap_or(0);
+                    self.stack_reserved += n;
+                    self.reservations += 1;
+                }
                 self.block_len += 1;
                 if cat == "control" {
                     self.block_lengths.add(self.block_len as usize);
@@ -281,25 +341,42 @@ impl Dynamic {
                             .by_type
                             .entry(args.get(1).unwrap_or(&"?").to_string())
                             .or_default() += 1;
-                        self.live.insert(id, (self.steps, 0));
+                        self.live.insert(
+                            id,
+                            Operand {
+                                birth: self.steps,
+                                forwards: 0,
+                                load: self.cur_is_load,
+                                first_hop: None,
+                            },
+                        );
                     }
                     "Forward" => {
                         self.forwards += 1;
                         if let Some(e) = self.live.get_mut(&id) {
-                            e.1 += 1;
+                            e.forwards += 1;
+                            if e.first_hop.is_none() {
+                                e.first_hop = Some(self.steps - e.birth);
+                            }
                         }
                     }
                     "Consume" | "Discard" => {
-                        if let Some((birth, fw)) = self.live.remove(&id) {
-                            let life = (self.steps - birth) as usize;
+                        if let Some(op) = self.live.remove(&id) {
+                            let life = (self.steps - op.birth) as usize;
+                            let hop = op.first_hop.unwrap_or(self.steps - op.birth) as usize;
                             if ev == "Consume" {
                                 self.consumed += 1;
                                 self.lifetime.add(life);
+                                self.first_hop.add(hop);
+                                if op.load {
+                                    self.load_lifetime.add(life);
+                                    self.load_first_hop.add(hop);
+                                }
                             } else {
                                 self.discarded += 1;
                                 self.discarded_lifetime.add(life);
                             }
-                            self.forwards_per_operand.add(fw as usize);
+                            self.forwards_per_operand.add(op.forwards as usize);
                         }
                     }
                     _ => {}
@@ -379,10 +456,11 @@ impl Dynamic {
         format!(
             "{{\"steps\": {}, \"timed_out\": {}, \"returned\": \"{}\", \"by_category\": {}, \"by_mnemonic\": {}, \"forms\": {}, \
              \"operands\": {{\"produced\": {}, \"consumed\": {}, \"discarded\": {}, \"forwards\": {}, \"live_at_end\": {}, \
-             \"by_type\": {}, \"lifetime\": {}, \"discarded_lifetime\": {}, \"forwards_per_operand\": {}}}, \
+             \"by_type\": {}, \"lifetime\": {}, \"discarded_lifetime\": {}, \"forwards_per_operand\": {}, \
+             \"first_hop\": {}, \"load_lifetime\": {}, \"load_first_hop\": {}}}, \
              \"occupancy\": {}, \"control\": {}, \
              \"memory\": {{\"loads\": {}, \"load_bytes\": {}, \"stores\": {}, \"store_bytes\": {}, \"stack_loads\": {}, \"stack_stores\": {}}}, \
-             \"stack\": {{\"max_depth_bytes\": {}}}, \"blocks\": {}}}",
+             \"stack\": {{\"max_depth_bytes\": {}, \"reserved_bytes\": {}, \"reservations\": {}}}, \"blocks\": {}}}",
             self.steps,
             self.timed_out,
             self.returned,
@@ -398,6 +476,9 @@ impl Dynamic {
             self.lifetime.json(),
             self.discarded_lifetime.json(),
             self.forwards_per_operand.json(),
+            self.first_hop.json(),
+            self.load_lifetime.json(),
+            self.load_first_hop.json(),
             self.occupancy.json(),
             control,
             self.loads,
@@ -407,6 +488,8 @@ impl Dynamic {
             self.stack_loads,
             self.stack_stores,
             self.stack_max_depth,
+            self.stack_reserved,
+            self.reservations,
             self.block_lengths.json(),
         )
     }

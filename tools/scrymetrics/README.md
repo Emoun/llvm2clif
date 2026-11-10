@@ -16,22 +16,30 @@ qemu-riscv32 -d exec,in_asm,nochain prog-rv32.elf 2>&1 >/dev/null | tools/scryme
 counts the instructions by mnemonic and category, telling two forms apart:
 a *far* jump (target offset 0: the target comes from an operand materialized
 by a `const`/`grow` chain) from a short one, and a *long* `echo` (one 10-bit
-reference) from the short form with two 5-bit references. `dynamic` reads
-the simulator's event trace from standard input, one step at a time without
-storing it, and reports:
+reference) from the short form with two 5-bit references. It also reports
+what the encodings say about distances: the output references of all
+instructions (`out_refs`, 1 = the next instruction), of loads (`load_refs`)
+and of echoes (`echo_refs`), the trigger offsets of jumps, calls and
+returns (`trigger`) and the sizes of stack reservations (`frames`).
+`dynamic` reads the simulator's event trace from standard input, one step
+at a time without storing it, and reports:
 
 * the dynamic instruction mix by mnemonic and category, with the same two
   forms (`forms`: `jmp_far`, `jmp_short`, `echo_long`, `echo_short`);
 * operand lifetimes: instructions from a value's production to its final
-  consumption (mean, median, 90th and 99th percentile, maximum), how many
-  values are produced and never consumed (`Discard`), and how many times a
-  value is forwarded by `echo` on its way;
+  consumption (mean, median, 90th and 99th percentile, maximum), the
+  distance to its first forward or consumption (`first_hop`, the dynamic
+  counterpart of the output reference), the same two for values produced
+  by loads (`load_lifetime`, `load_first_hop`), how many values are
+  produced and never consumed (`Discard`), and how many times a value is
+  forwarded by `echo` on its way;
 * occupancy: how many produced values are alive per step;
 * control flow: instructions from a jump, call or return being issued to its
   trigger (zero when the compiler uses no trigger delay, as it does today),
   and the length of the straight-line runs between control instructions;
 * memory traffic: loads and stores to data and to the stack, with bytes;
-* the deepest stack extent seen;
+* the deepest stack extent seen, and the bytes reserved by `rsrv` over the
+  run with the number of reservations;
 * `timed_out`: whether the simulator stopped at its `--timeout` instead of
   running to the end (then `returned` is empty and the counts cover the
   instructions executed up to the limit).
@@ -47,12 +55,16 @@ log of `qemu-riscv32`/`qemu-riscv64 -d exec,in_asm,nochain`: the
 each one), and nothing but the encodings is used. It reports the dynamic
 mix, the lifetime of register values (from the instruction that writes a
 register to the last one that reads it before it is overwritten; a value
-that is never read counts as discarded), the number of live register values
-after each instruction, branch and call counts, block lengths, loads and
-stores (with those addressed from `sp` apart) and the stack depth, which it
-follows through the constant adjustments of `sp` (`"known": false` when an
-instruction set `sp` from another register, as a variable-length array
-does).
+that is never read counts as discarded), the distance to a value's first
+use (`first_use`) and the same for loaded values (`load_use`), the number
+of live register values after each instruction, branch and call counts,
+block lengths, loads and stores (with those addressed from `sp` apart) and
+the stack: its deepest extent, which the pass follows through the constant
+adjustments of `sp` (`"known": false` when an instruction set `sp` from
+another register, as a variable-length array does), and the bytes those
+adjustments reserved. The static pass reports the same distances as the
+code shows them, the first use of a register within its block
+(`first_use`, `load_use`), and the frame sizes (`frames`).
 
 The RISC-V categories are `alu`, `constant`, `move` (`mv`), `control`,
 `memory`, `nop`, `system` (`ecall`, `fence`, CSR accesses) and `other`

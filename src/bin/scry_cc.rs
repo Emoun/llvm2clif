@@ -4,7 +4,7 @@
 //! (LLVM IR -> Cranelift IR -> Scry object) -> `wild` (linking).
 
 use llvm2clif::driver::{self, Config, Mode};
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 
 const USAGE: &str = "\
@@ -25,6 +25,8 @@ Options:
   --no-runtime         Do not link the bundled runtime library (memcpy, malloc, ...)
   --heap-size <BYTES>  Size of the runtime's heap (default 8192)
   --no-gc-sections     Keep unreferenced sections when linking
+  --cranelift-opt-level <L>  Cranelift's own optimizer: none (default, the IR
+                       arrives optimized from opt) or speed
   --skip-unsupported   Skip functions using unsupported constructs (warning)
   -Wl,<ARG>            Pass <ARG> to the linker
   --run                Run the linked program on the simulator; arguments
@@ -58,6 +60,16 @@ const CLANG_OPTIONS_WITH_VALUE: &[&str] = &[
     "-Xpreprocessor",
     "-mllvm",
 ];
+
+fn cranelift_opt_level(s: &OsStr) -> Result<llvm2clif::translate::OptLevel, String> {
+    match s.to_string_lossy().as_ref() {
+        "none" => Ok(llvm2clif::translate::OptLevel::None),
+        "speed" => Ok(llvm2clif::translate::OptLevel::Speed),
+        other => Err(format!(
+            "unknown Cranelift optimization level `{other}` (none or speed)"
+        )),
+    }
+}
 
 fn main() {
     let cfg = match parse_args(std::env::args_os().skip(1).collect()) {
@@ -107,6 +119,9 @@ fn parse_args(args: Vec<OsString>) -> Result<Option<Config>, String> {
                     .parse()
                     .map_err(|_| "invalid --heap-size".to_string())?
             }
+            "--cranelift-opt-level" => {
+                cfg.cranelift_opt_level = cranelift_opt_level(&value("--cranelift-opt-level")?)?
+            }
             "--no-gc-sections" => cfg.gc_sections = false,
             "--skip-unsupported" => cfg.skip_unsupported = true,
             "--run" => run_args = Some(Vec::new()),
@@ -124,7 +139,9 @@ fn parse_args(args: Vec<OsString>) -> Result<Option<Config>, String> {
                 }
             }
             _ => {
-                if let Some(level) = s.strip_prefix("-O") {
+                if let Some(level) = s.strip_prefix("--cranelift-opt-level=") {
+                    cfg.cranelift_opt_level = cranelift_opt_level(level.as_ref())?;
+                } else if let Some(level) = s.strip_prefix("-O") {
                     match level {
                         "0" | "1" | "2" | "3" | "s" | "z" => cfg.opt_level = level.to_string(),
                         "" => cfg.opt_level = "2".to_string(),

@@ -141,6 +141,8 @@ scry-cc [OPTIONS] <INPUT>... [-- <SIMULATOR ARGS>...]
   --no-runtime         Do not link the bundled runtime library
   --heap-size <BYTES>  Size of the runtime's malloc heap (default 8192)
   --no-gc-sections     Keep unreferenced sections when linking
+  --cranelift-opt-level <L>  Cranelift's own optimizer: none (default, the IR
+                       arrives optimized from opt) or speed
   --skip-unsupported   Skip functions using unsupported constructs (warning)
   -Wl,<ARG>            Pass <ARG> to the linker
   --run                Run the linked program on the simulator

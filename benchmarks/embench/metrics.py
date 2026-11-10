@@ -14,7 +14,10 @@ qemu-riscv32 with its execution log piped into `scrymetrics rv32`, writes
 each benchmark for rv64imc through llvm2clif and Cranelift's riscv64 backend
 (the same translation as for Scry, from 64-bit IR), with and without Cranelift's
 optimizer, runs it on qemu-riscv64 and writes <out>/<bench>/rv64cl.json.
---skip-scry leaves the Scry passes out (their metrics.json files are re-read).
+With --scry-speed, rebuilds each benchmark for Scry with Cranelift's optimizer
+on (scry-cc --cranelift-opt-level speed, the command taken from compile.log)
+and measures it too (metrics_speed.json). --skip-scry leaves the Scry passes
+out (their metrics.json files are re-read).
 
 Usage: python3 benchmarks/embench/metrics.py [--out benchmarks/embench/out] [--jobs 3] [--rv32] [--rv64]
 Needs tools/scrymetrics built (cargo build --release in tools/scrymetrics); the
@@ -31,21 +34,42 @@ ROOT = HERE.parent.parent
 CATS = ["alu", "dataflow", "control", "constant", "memory", "cast", "nop", "other"]
 
 
-def measure(a, bench):
-    d = Path(a.out) / bench
-    elf = d / f"{bench}.elf"
+def measure_scry(a, bench, elf):
+    """Static and dynamic metrics of a Scry executable."""
     st = json.loads(subprocess.check_output([a.scrymetrics, "static", str(elf)], text=True))
     sim = subprocess.Popen([a.scryer, str(elf), "--stack-buffer", "1048576", "--print-events", *a.sim_args.split()],
                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     dyn = subprocess.run([a.scrymetrics, "dynamic"], stdin=sim.stdout, capture_output=True, text=True, timeout=a.timeout)
     sim.wait()
-    result = {"bench": bench, "static": st, "dynamic": json.loads(dyn.stdout)}
+    return {"bench": bench, "static": st, "dynamic": json.loads(dyn.stdout)}
+
+
+def measure(a, bench):
+    d = Path(a.out) / bench
+    result = measure_scry(a, bench, d / f"{bench}.elf")
     (d / "metrics.json").write_text(json.dumps(result, indent=1))
     return result
 
 
-def run(cmd):
-    r = subprocess.run(cmd, capture_output=True, text=True)
+def measure_scry_speed(a, bench):
+    """The benchmark built again with Cranelift's optimizer on (`scry-cc
+    --cranelift-opt-level speed`; the command comes from run_embench.py's
+    compile.log) and its metrics, in metrics_speed.json."""
+    d = Path(a.out) / bench
+    log = d / "compile.log"
+    if not log.exists():
+        raise RuntimeError(f"{log} is needed to rebuild {bench} with Cranelift's optimizer on")
+    args = log.read_text().splitlines()[0].split()[2:]
+    elf = d / f"{bench}.speed.elf"
+    args[args.index("-o") + 1] = str(elf)
+    run([a.scry_cc, *args, "--cranelift-opt-level", "speed"], timeout=a.compile_timeout)
+    result = measure_scry(a, bench, elf)
+    (d / "metrics_speed.json").write_text(json.dumps(result, indent=1))
+    return result
+
+
+def run(cmd, timeout=1800):
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
     if r.returncode:
         raise RuntimeError(f"{' '.join(map(str, cmd))}\n{r.stderr}")
     return r
@@ -155,6 +179,8 @@ def load(a, bench):
     """The stored results of a benchmark: metrics.json (Scry) plus rv32imc.json when present."""
     d = Path(a.out) / bench
     r = json.loads((d / "metrics.json").read_text()) if (d / "metrics.json").exists() else {"bench": bench}
+    if (d / "metrics_speed.json").exists():
+        r["scry_speed"] = json.loads((d / "metrics_speed.json").read_text())
     if (d / "rv32imc.json").exists():
         r["rv32"] = json.loads((d / "rv32imc.json").read_text())
     if (d / "rv64cl.json").exists():
@@ -163,12 +189,20 @@ def load(a, bench):
 
 
 def process(a, bench):
-    if not a.tables_only and not a.skip_scry:
-        measure(a, bench)
-    if a.rv32 and not a.tables_only:
-        measure_rv32(a, bench)
-    if a.rv64 and not a.tables_only:
-        measure_rv64(a, bench)
+    """Runs the requested measurements of one benchmark; a failure is reported at
+    once and leaves that benchmark's earlier results in place."""
+    try:
+        if not a.tables_only and not a.skip_scry:
+            measure(a, bench)
+        if a.scry_speed and not a.tables_only:
+            measure_scry_speed(a, bench)
+        if a.rv32 and not a.tables_only:
+            measure_rv32(a, bench)
+        if a.rv64 and not a.tables_only:
+            measure_rv64(a, bench)
+    except Exception as e:  # noqa: BLE001 - reported, the other benchmarks go on
+        print(f"{bench}: FAILED: {e}", file=sys.stderr, flush=True)
+        a.failures.append(bench)
     return load(a, bench)
 
 
@@ -176,136 +210,100 @@ def pct(part, whole):
     return f"{100.0 * part / whole:5.1f}" if whole else "  -  "
 
 
+def ratio(x, y):
+    return f"{x / y:.2f}" if y else "  -  "
+
+
 def name(r):
     """Benchmark name, starred when the trace was cut short by an instruction limit."""
     return r["bench"] + ("*" if r["dynamic"].get("timed_out") else "")
 
 
-def ratio(x, y):
-    return f"{x / y:.2f}" if y else "  -  "
-
-
 def variants(r):
-    """The RISC-V results of a benchmark: (label, exit code, text bytes, static, dynamic)."""
+    """The builds of a benchmark that have results, in a fixed order: label, kind
+    (scry or riscv), static and dynamic metrics, whether the run verified."""
     out = []
+    if r.get("dynamic"):
+        d = r["dynamic"]
+        out.append({"label": "Scry", "kind": "scry", "static": r["static"], "dynamic": d,
+                    "ok": d.get("returned") == "0u32" and not d.get("timed_out")})
+    if r.get("scry_speed"):
+        v = r["scry_speed"]
+        out.append({"label": "Scry, optimizer on", "kind": "scry", "static": v["static"], "dynamic": v["dynamic"],
+                    "ok": v["dynamic"].get("returned") == "0u32"})
     if r.get("rv64"):
-        v = r["rv64"]["none"]
-        out.append(("rv64imc Cranelift", v["exit_code"], v["text_bytes"], v["static"], v["dynamic"]))
+        for key, label in (("none", "rv64imc Cranelift"), ("speed", "rv64imc Cranelift, optimizer on")):
+            v = r["rv64"][key]
+            out.append({"label": label, "kind": "riscv", "static": v["static"], "dynamic": v["dynamic"], "ok": v["exit_code"] == 0})
     if r.get("rv32"):
         v = r["rv32"]
-        out.append(("rv32imc llc", v["exit_code"], v["text_bytes"]["rv32imc"], v["static"]["rv32imc"], v["dynamic"]))
+        out.append({"label": "rv32imc llc", "kind": "riscv", "static": v["static"]["rv32imc"], "dynamic": v["dynamic"], "ok": v["exit_code"] == 0})
     return out
 
 
-def rv_tables(results):
-    rs = [r for r in results if r.get("dynamic") and (r.get("rv32") or r.get("rv64"))]
-    if not rs:
-        return []
-    labels = [v[0] for v in variants(rs[0])]
-    both = len(labels) == 2
-    slash = " / ".join(labels)
-    out = ["\n### Scry against RISC-V: instructions executed\n"]
-    head = "| benchmark | Scry |"
-    for l in labels:
-        head += f" {l} | Scry ratio |"
-    if any(r.get("rv64") for r in rs):
-        head += " rv64imc Cranelift, optimizer on | Scry ratio |"
-    out += [head, "|---|---:|" + "---:|" * (head.count("|") - 3)]
-    tot = {}
-    for r in rs:
-        s = r["dynamic"]["steps"]; tot["scry"] = tot.get("scry", 0) + s
-        row = f"| {name(r)} | {s} |"
-        for label, code, _, _, dyn in variants(r):
-            v = dyn["instructions"]; tot[label] = tot.get(label, 0) + v
-            row += f" {v}{'†' if code else ''} | {ratio(s, v)} |"
-        if r.get("rv64"):
-            v = r["rv64"]["speed"]["dynamic"]["instructions"]; tot["speed"] = tot.get("speed", 0) + v
-            row += f" {v}{'†' if r['rv64']['speed']['exit_code'] else ''} | {ratio(s, v)} |"
-        out.append(row)
-    row = f"| **total** | **{tot['scry']}** |"
-    for l in labels:
-        row += f" **{tot[l]}** | **{ratio(tot['scry'], tot[l])}** |"
-    if "speed" in tot:
-        row += f" **{tot['speed']}** | **{ratio(tot['scry'], tot['speed'])}** |"
-    out.append(row)
+def is_scry(v):
+    return v["kind"] == "scry"
 
-    out.append("\n### Code size against RISC-V\n")
-    head = "| benchmark | Scry bytes | static instructions |"
-    for l in labels:
-        head += f" {l} bytes | Scry ratio | static instructions | compressed % |"
-    if any(r.get("rv32") for r in rs):
-        head += " rv32im llc bytes | Scry ratio |"
-    out += [head, "|---|---:|---:|" + "---:|" * (head.count("|") - 4)]
-    tot = {}
-    for r in rs:
-        sb = r["static"]["text_bytes"]; tot["scry"] = tot.get("scry", 0) + sb
-        row = f"| {r['bench']} | {sb} | {r['static']['instructions']} |"
-        for label, _, bytes_, st, _ in variants(r):
-            tot[label] = tot.get(label, 0) + bytes_
-            row += f" {bytes_} | {ratio(sb, bytes_)} | {st['instructions']} | {pct(st['compressed'], st['instructions']).strip()} |"
-        if r.get("rv32"):
-            ib = r["rv32"]["text_bytes"]["rv32im"]; tot["im"] = tot.get("im", 0) + ib
-            row += f" {ib} | {ratio(sb, ib)} |"
-        out.append(row)
-    row = f"| **total** | **{tot['scry']}** | |"
-    for l in labels:
-        row += f" **{tot[l]}** | **{ratio(tot['scry'], tot[l])}** | | |"
-    if "im" in tot:
-        row += f" **{tot['im']}** | **{ratio(tot['scry'], tot['im'])}** |"
-    out.append(row)
 
-    out.append(f"\n### RISC-V dynamic instruction mix ({slash})\n")
-    out.append("| benchmark | alu % | constant % | move % | control % | memory % | other % | compressed % | branches taken % |")
-    out.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|")
-    def cell(vals):
-        return " / ".join(vals)
-    for r in rs:
-        vs = variants(r)
-        cols = []
-        for c in ("alu", "constant", "move", "control", "memory"):
-            cols.append(cell(pct(d["by_category"].get(c, 0), d["instructions"]).strip() for _, _, _, _, d in vs))
-        cols.append(cell(pct(sum(x for k, x in d["by_category"].items() if k not in ("alu", "constant", "move", "control", "memory")), d["instructions"]).strip() for _, _, _, _, d in vs))
-        cols.append(cell(pct(d["forms"]["compressed"], d["instructions"]).strip() for _, _, _, _, d in vs))
-        cols.append(cell(pct(d["forms"]["branches_taken"], d["forms"]["branches"]).strip() for _, _, _, _, d in vs))
-        out.append(f"| {r['bench']} | " + " | ".join(cols) + " |")
+def instr(v):
+    return v["dynamic"]["steps"] if is_scry(v) else v["dynamic"]["instructions"]
 
-    out.append(f"\n### Values: Scry operands against RISC-V register values (Scry / {slash})\n")
-    out.append("| benchmark | lifetime median | mean | p90 | live values mean | max | never used % |")
-    out.append("|---|---:|---:|---:|---:|---:|---:|")
-    for r in rs:
-        so = r["dynamic"]["operands"]; sl = so["lifetime"]; sq = r["dynamic"]["occupancy"]
-        vs = [d for _, _, _, _, d in variants(r)]
-        out.append(f"| {name(r)} | " + cell([str(sl["median"])] + [str(d["operands"]["lifetime"]["median"]) for d in vs])
-                   + " | " + cell([f"{sl['mean']:.1f}"] + [f"{d['operands']['lifetime']['mean']:.1f}" for d in vs])
-                   + " | " + cell([str(sl["p90"])] + [str(d["operands"]["lifetime"]["p90"]) for d in vs])
-                   + " | " + cell([f"{sq['mean']:.1f}"] + [f"{d['occupancy']['mean']:.1f}" for d in vs])
-                   + " | " + cell([str(sq["max"])] + [str(d["occupancy"]["max"]) for d in vs])
-                   + " | " + cell([pct(so["discarded"], so["produced"]).strip()] + [pct(d["operands"]["discarded"], d["operands"]["defined"]).strip() for d in vs]) + " |")
 
-    out.append(f"\n### Control flow and memory: Scry against RISC-V (Scry / {slash})\n")
-    out.append("| benchmark | block length mean | median | calls | loads+stores | of which stack-relative | max stack bytes |")
-    out.append("|---|---:|---:|---:|---:|---:|---:|")
-    for r in rs:
-        sd = r["dynamic"]; sm = sd["memory"]
-        vs = [d for _, _, _, _, d in variants(r)]
-        s_acc = sm["loads"] + sm["stores"] + sm["stack_loads"] + sm["stack_stores"]
-        out.append(f"| {name(r)} | " + cell([f"{sd['blocks']['mean']:.1f}"] + [f"{d['blocks']['mean']:.1f}" for d in vs])
-                   + " | " + cell([str(sd["blocks"]["median"])] + [str(d["blocks"]["median"]) for d in vs])
-                   + " | " + cell([str(sd["control"].get("Call", {}).get("count", 0))] + [str(d["forms"]["calls"]) for d in vs])
-                   + " | " + cell([str(s_acc)] + [str(d["memory"]["loads"] + d["memory"]["stores"]) for d in vs])
-                   + " | " + cell([str(sm["stack_loads"] + sm["stack_stores"])] + [str(d["memory"]["stack_loads"] + d["memory"]["stack_stores"]) for d in vs])
-                   + " | " + cell([str(sd["stack"]["max_depth_bytes"])] + [str(d["stack"]["max_depth_bytes"]) if d["stack"]["known"] else "?" for d in vs]) + " |")
-    if any(code for r in rs for _, code, _, _, _ in variants(r)) or any(r.get("rv64") and r["rv64"]["speed"]["exit_code"] for r in rs):
-        out.append("\n† the RISC-V build did not return 0 from `main` (its verification failed).")
-    if any(not d["stack"]["known"] for r in rs for _, _, _, _, d in variants(r)):
-        out.append("\n? the RISC-V code sets `sp` from a register (a variable-length array), which the execution log cannot follow.")
-    return out
+def fetched(v):
+    d = v["dynamic"]
+    return 2 * d["steps"] if is_scry(v) else 4 * d["instructions"] - 2 * d["forms"]["compressed"]
+
+
+def mem_ops(v):
+    m = v["dynamic"]["memory"]
+    return m["loads"] + m["stores"] + (m["stack_loads"] + m["stack_stores"] if is_scry(v) else 0)
+
+
+def hist(h, *keys):
+    return " / ".join(f"{h[k]:.1f}" if isinstance(h[k], float) else str(h[k]) for k in keys)
+
+
+LABELS = ["Scry", "Scry, optimizer on", "rv64imc Cranelift", "rv64imc Cranelift, optimizer on", "rv32imc llc"]
+
+
+def variant_table(out, title, results, cell, note=""):
+    """A table with one column per build: `cell(v)` renders a build's value."""
+    present = {v["label"] for r in results for v in variants(r)}
+    labels = [l for l in LABELS if l in present]
+    out.append(f"\n### {title}\n")
+    if note:
+        out.append(note + "\n")
+    out.append("| benchmark | " + " | ".join(labels) + " |")
+    out.append("|---|" + "---:|" * len(labels))
+    for r in results:
+        by_label = {v["label"]: v for v in variants(r)}
+        cells = []
+        for l in labels:
+            v = by_label.get(l)
+            cells.append((cell(v) + ("" if v["ok"] else "†")) if v else "-")
+        out.append(f"| {name(r)} | " + " | ".join(cells) + " |")
+
+
+def mix_rows(out, results, pick):
+    """The Scry dynamic mix table for the build `pick(r)` returns (None skips the row)."""
+    out.append("| benchmark | instructions | " + " | ".join(f"{c} %" for c in CATS) + " | echo | of which long | dup | const+grow | cast | far jumps % of jumps | 8/16-bit operands % |")
+    out.append("|---|---:|" + "---:|" * (len(CATS) + 7))
+    for r in results:
+        d = pick(r)
+        if not d:
+            continue
+        n = d["steps"]; bc = d["by_category"]; bm = d["by_mnemonic"]; fm = d.get("forms", {})
+        jumps = fm.get("jmp_far", 0) + fm.get("jmp_short", 0)
+        bt = d["operands"]["by_type"]; ops = sum(bt.values())
+        narrow = sum(v for t, v in bt.items() if t in ("u8", "i8", "u16", "i16"))
+        out.append(f"| {name(r)} | {n} | " + " | ".join(pct(bc.get(c, 0), n) for c in CATS)
+                   + f" | {pct(bm.get('echo', 0), n)} | {pct(fm.get('echo_long', 0), bm.get('echo', 0))} | {pct(bm.get('dup', 0), n)} | {pct(bm.get('const', 0) + bm.get('grow', 0), n)} | {pct(bm.get('cast', 0), n)} | {pct(fm.get('jmp_far', 0), jumps)} | {pct(narrow, ops)} |")
 
 
 def tables(results):
     results = [r for r in results if r.get("dynamic")]
     out = []
-    out.append("### Code size and static instruction mix\n")
+    out.append("### Code size and static instruction mix (Scry)\n")
     out.append("| benchmark | code bytes | instructions | " + " | ".join(f"{c} %" for c in CATS) + " | long echoes % of echoes | far jumps % of jumps | grow per const |")
     out.append("|---|---:|---:|" + "---:|" * (len(CATS) + 3))
     for r in results:
@@ -313,24 +311,22 @@ def tables(results):
         echoes = fm.get("echo_long", 0) + fm.get("echo_short", 0); jumps = fm.get("jmp_far", 0) + fm.get("jmp_short", 0)
         out.append(f"| {r['bench']} | {s['text_bytes']} | {n} | " + " | ".join(pct(bc.get(c, 0), n) for c in CATS)
                    + f" | {pct(fm.get('echo_long', 0), echoes)} | {pct(fm.get('jmp_far', 0), jumps)} | {s['by_mnemonic'].get('grow', 0) / max(s['by_mnemonic'].get('const', 0), 1):.2f} |")
-    out.append("\n### Dynamic instruction mix\n")
-    out.append("| benchmark | instructions | " + " | ".join(f"{c} %" for c in CATS) + " | echo | of which long | dup | const+grow | cast | far jumps % of jumps | 8/16-bit operands % |")
-    out.append("|---|---:|" + "---:|" * (len(CATS) + 7))
-    for r in results:
-        d = r["dynamic"]; n = d["steps"]; bc = d["by_category"]; bm = d["by_mnemonic"]; fm = d.get("forms", {})
-        jumps = fm.get("jmp_far", 0) + fm.get("jmp_short", 0)
-        bt = d["operands"]["by_type"]; ops = sum(bt.values())
-        narrow = sum(v for t, v in bt.items() if t in ("u8", "i8", "u16", "i16"))
-        out.append(f"| {name(r)} | {n} | " + " | ".join(pct(bc.get(c, 0), n) for c in CATS)
-                   + f" | {pct(bm.get('echo', 0), n)} | {pct(fm.get('echo_long', 0), bm.get('echo', 0))} | {pct(bm.get('dup', 0), n)} | {pct(bm.get('const', 0) + bm.get('grow', 0), n)} | {pct(bm.get('cast', 0), n)} | {pct(fm.get('jmp_far', 0), jumps)} | {pct(narrow, ops)} |")
-    out.append("\n### Operand lifetimes (instructions from production to final consumption) and queue occupancy\n")
-    out.append("| benchmark | operands | mean | median | p90 | p99 | max | discarded % | forwards per operand | live operands mean | max |")
+
+    out.append("\n### Dynamic instruction mix (Scry)\n")
+    mix_rows(out, results, lambda r: r["dynamic"])
+    if any(r.get("scry_speed") for r in results):
+        out.append("\n### Dynamic instruction mix (Scry, Cranelift's optimizer on)\n")
+        mix_rows(out, results, lambda r: r.get("scry_speed", {}).get("dynamic"))
+
+    out.append("\n### Operand lifetimes and queue occupancy (Scry)\n")
+    out.append("| benchmark | operands | lifetime mean | median | p90 | p99 | max | discarded % | forwards per operand | live operands mean | max |")
     out.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
     for r in results:
         o = r["dynamic"]["operands"]; lt = o["lifetime"]; occ = r["dynamic"]["occupancy"]
-        out.append(f"| {name(r)} | {o['produced']} | {lt['mean']} | {lt['median']} | {lt['p90']} | {lt['p99']} | {lt['max']} | "
-                   f"{pct(o['discarded'], o['produced'])} | {o['forwards_per_operand']['mean']} | {occ['mean']} | {occ['max']} |")
-    out.append("\n### Control flow\n")
+        out.append(f"| {name(r)} | {o['produced']} | {lt['mean']} | {lt['median']} | {lt['p90']} | {lt['p99']} | {lt['max']} | {pct(o['discarded'], o['produced'])} | "
+                   f"{o['forwards_per_operand']['mean']} | {occ['mean']} | {occ['max']} |")
+
+    out.append("\n### Control flow (Scry)\n")
     out.append("| benchmark | calls | jumps | returns | jump issue to trigger mean | p99 | max | block length mean | median | dataflow instr per block |")
     out.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
     for r in results:
@@ -340,14 +336,71 @@ def tables(results):
         out.append(f"| {name(r)} | {c.get('Call', {}).get('count', 0)} | {j['count']} | {c.get('Return', {}).get('count', 0)} | "
                    f"{j['mean']} | {j['p99']} | {j['max']} | {b['mean']} | {b['median']} | "
                    f"{r['dynamic']['by_category'].get('dataflow', 0) / max(blocks, 1):.1f} |")
-    out.append("\n### Memory traffic and stack\n")
+
+    out.append("\n### Memory traffic and stack (Scry)\n")
     out.append("| benchmark | loads | stores | stack-indexed loads | stack-indexed stores | bytes loaded | bytes stored | loads+stores per 100 instr | max stack bytes |")
     out.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|")
     for r in results:
         m = r["dynamic"]["memory"]; n = r["dynamic"]["steps"]
         out.append(f"| {name(r)} | {m['loads']} | {m['stores']} | {m['stack_loads']} | {m['stack_stores']} | {m['load_bytes']} | {m['store_bytes']} | "
                    f"{100.0 * (m['loads'] + m['stores'] + m['stack_loads'] + m['stack_stores']) / n:.1f} | {r['dynamic']['stack']['max_depth_bytes']} |")
-    out += rv_tables(results)
+
+    rv = [r for r in results if r.get("rv32") or r.get("rv64")]
+    if rv:
+        labels = [v["label"] for v in variants(rv[0]) if not is_scry(v)]
+        out.append(f"\n### RISC-V dynamic instruction mix ({' / '.join(labels)})\n")
+        out.append("| benchmark | alu % | constant % | move % | control % | memory % | other % | compressed % | branches taken % |")
+        out.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|")
+        for r in rv:
+            ds = [v["dynamic"] for v in variants(r) if not is_scry(v)]
+            cols = []
+            for c in ("alu", "constant", "move", "control", "memory"):
+                cols.append(" / ".join(pct(d["by_category"].get(c, 0), d["instructions"]).strip() for d in ds))
+            cols.append(" / ".join(pct(sum(x for k, x in d["by_category"].items() if k not in ("alu", "constant", "move", "control", "memory")), d["instructions"]).strip() for d in ds))
+            cols.append(" / ".join(pct(d["forms"]["compressed"], d["instructions"]).strip() for d in ds))
+            cols.append(" / ".join(pct(d["forms"]["branches_taken"], d["forms"]["branches"]).strip() for d in ds))
+            out.append(f"| {r['bench']} | " + " | ".join(cols) + " |")
+
+    multi = [r for r in results if len(variants(r)) > 1]
+    if multi:
+        variant_table(out, "Instructions: executed / static", multi, lambda v: f"{instr(v)} / {v['static']['instructions']}")
+        variant_table(out, "Instruction bytes: fetched (dynamic) / code size (static)", multi, lambda v: f"{fetched(v)} / {v['static']['text_bytes']}",
+                      "Scry instructions are 2 bytes; RISC-V ones 2 or 4.")
+        variant_table(out, "Value lifetimes: median / mean / p90 (instructions from production to the last consumption)", multi,
+                      lambda v: hist(v["dynamic"]["operands"]["lifetime"], "median", "mean", "p90"))
+        variant_table(out, "First use of a value: dynamic median / mean · static median / mean", multi,
+                      lambda v: hist(v["dynamic"]["operands"]["first_hop" if is_scry(v) else "first_use"], "median", "mean") + " · "
+                      + hist(v["static"]["out_refs" if is_scry(v) else "first_use"], "median", "mean"),
+                      "Dynamic: instructions from a value's production to its first forward or consumption (Scry) or to the first read of the "
+                      "register (RISC-V). Static: the output reference distance of every instruction (Scry) or the distance to the first "
+                      "reader of the register within the block (RISC-V).")
+        variant_table(out, "Load to consume: dynamic median / mean / p90 · static median / mean", multi,
+                      lambda v: hist(v["dynamic"]["operands"]["load_lifetime" if is_scry(v) else "load_use"], "median", "mean", "p90") + " · "
+                      + hist(v["static"]["load_refs" if is_scry(v) else "load_use"], "median", "mean"),
+                      "Dynamic: instructions from a load to the consumption of its value (Scry: the consuming instruction; RISC-V: the first "
+                      "read of the loaded register). Static: the load's output reference (Scry) or the distance to the first reader in the "
+                      "block (RISC-V).")
+        variant_table(out, "Live values: mean / max; never used %", multi,
+                      lambda v: hist(v["dynamic"]["occupancy"], "mean", "max") + "; "
+                      + pct(v["dynamic"]["operands"]["discarded"], v["dynamic"]["operands"]["produced" if is_scry(v) else "defined"]).strip())
+        variant_table(out, "Jump issue to trigger (Scry): dynamic mean / p99 / max · static mean / max", multi,
+                      lambda v: (hist(v["dynamic"]["control"].get("Jump", {"mean": 0.0, "p99": 0, "max": 0}), "mean", "p99", "max") + " · "
+                                 + hist(v["static"]["trigger"], "mean", "max")) if is_scry(v) else "-",
+                      "The distance between a jump's issue and its trigger, in instructions; RISC-V has no such delay.")
+        variant_table(out, "Executed block length: mean / median; calls", multi,
+                      lambda v: hist(v["dynamic"]["blocks"], "mean", "median") + "; " + str(v["dynamic"]["control"].get("Call", {}).get("count", 0) if is_scry(v) else v["dynamic"]["forms"]["calls"]))
+        variant_table(out, "Memory: loads+stores / of which stack-relative / bytes", multi,
+                      lambda v: f"{mem_ops(v)} / {v['dynamic']['memory']['stack_loads'] + v['dynamic']['memory']['stack_stores']} / {v['dynamic']['memory']['load_bytes'] + v['dynamic']['memory']['store_bytes']}",
+                      "Stack-relative: Scry's stack-indexed `ld`/`st`, RISC-V's `sp`-relative loads and stores (spills and locals).")
+        variant_table(out, "Stack: max depth / bytes reserved / reservations · static frame size mean / max", multi,
+                      lambda v: f"{v['dynamic']['stack']['max_depth_bytes'] if is_scry(v) or v['dynamic']['stack']['known'] else '?'} / "
+                                f"{v['dynamic']['stack']['reserved_bytes']} / {v['dynamic']['stack']['reservations']} · " + hist(v["static"]["frames"], "mean", "max"),
+                      "Dynamic: the deepest stack extent, the bytes reserved over the run (`rsrv` on Scry, constant decrements of `sp` on "
+                      "RISC-V) and how often. Static: the sizes of those reservations in the code.")
+    if any(not v["ok"] for r in results for v in variants(r)):
+        out.append("\n† the run did not return 0 from `main` (its verification failed) or was cut short.")
+    if any(not v["dynamic"]["stack"]["known"] for r in results for v in variants(r) if not is_scry(v)):
+        out.append("\n? the RISC-V code sets `sp` from a register (a variable-length array), which the execution log cannot follow.")
     if any(r["dynamic"].get("timed_out") for r in results):
         out.append("\n\\* traced up to the instruction limit given with `--sim-args` only; the program did not run to completion.")
     return "\n".join(out)
@@ -360,9 +413,12 @@ def main():
     ap.add_argument("--scrymetrics", default=str(ROOT / "tools/scrymetrics/target/release/scrymetrics"))
     ap.add_argument("--sim-args", default="")
     ap.add_argument("--jobs", type=int, default=3)
-    ap.add_argument("--timeout", type=float, default=7200)
+    ap.add_argument("--timeout", type=float, default=7200, help="seconds per simulator run")
+    ap.add_argument("--compile-timeout", type=float, default=1800, help="seconds per scry-cc build (--scry-speed)")
     ap.add_argument("--only", default="")
     ap.add_argument("--tables-only", action="store_true")
+    ap.add_argument("--scry-speed", action="store_true", help="also rebuild each benchmark with Cranelift's optimizer on and measure it")
+    ap.add_argument("--scry-cc", default=os.environ.get("SCRY_CC", str(ROOT / "target/release/scry-cc")))
     ap.add_argument("--rv32", action="store_true", help="also build, run and measure rv32imc versions (llc)")
     ap.add_argument("--rv64", action="store_true", help="also build, run and measure rv64imc versions (llvm2clif and Cranelift)")
     ap.add_argument("--skip-scry", action="store_true", help="do not rerun the Scry passes")
@@ -370,6 +426,7 @@ def main():
                           ("qemu64", "qemu-riscv64"), ("llvm2clif", str(ROOT / "target/release/llvm2clif"))]:
         ap.add_argument(f"--{tool}", default=os.environ.get(f"SCRY_{tool.upper()}", default))
     a = ap.parse_args()
+    a.failures = []
     benches = sorted(p.parent.name for p in Path(a.out).glob("*/*.elf") if p.stem == p.parent.name)
     if a.only:
         benches = [b for b in benches if b in a.only.split(",")]
@@ -380,6 +437,8 @@ def main():
             line = f"{r['bench']:16}"
             if r.get("dynamic"):
                 line += f" scry {r['dynamic']['steps']:>12} instructions, returned {r['dynamic']['returned']}"
+            if r.get("scry_speed"):
+                line += f" (optimized {r['scry_speed']['dynamic']['steps']}, returned {r['scry_speed']['dynamic']['returned']})"
             if r.get("rv32"):
                 line += f"; rv32imc {r['rv32']['dynamic']['instructions']:>12} instructions, exit {r['rv32']['exit_code']}"
             if r.get("rv64"):
@@ -387,6 +446,8 @@ def main():
                 line += f"; rv64imc {v['none']['dynamic']['instructions']:>12} instructions, exit {v['none']['exit_code']} (optimized {v['speed']['dynamic']['instructions']}, exit {v['speed']['exit_code']})"
             print(line, file=sys.stderr, flush=True)
     print(tables(results))
+    if a.failures:
+        sys.exit(f"failed: {', '.join(a.failures)}")
 
 
 if __name__ == "__main__":

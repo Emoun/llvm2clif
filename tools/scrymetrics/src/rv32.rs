@@ -561,6 +561,12 @@ pub fn run_static(path: &str, rv64: bool) -> Result<String, String> {
     let mut by_mnemonic: HashMap<&'static str, u64> = HashMap::new();
     let mut by_class = [0u64; 9];
     let (mut count, mut compressed, mut bytes) = (0u64, 0u64, 0u64);
+    // Frame sizes (constant decrements of `sp`), and the distance from a
+    // register's definition to its first use within the same block, for all
+    // definitions and for loads.
+    let mut frames = Hist::default();
+    let mut first_use = Hist::default();
+    let mut load_use = Hist::default();
     for section in file.sections() {
         if !section.name().unwrap_or("").starts_with(".text") {
             continue;
@@ -568,6 +574,9 @@ pub fn run_static(path: &str, rv64: bool) -> Result<String, String> {
         let code = section.data().map_err(|e| format!("{path}: {e}"))?;
         bytes += code.len() as u64;
         let mut off = 0;
+        // Pending definitions: (position, from a load) per register.
+        let mut pending: [Option<(u64, bool)>; 32] = [None; 32];
+        let mut pos = 0u64;
         while off + 2 <= code.len() {
             let lo = u16::from_le_bytes([code[off], code[off + 1]]) as u32;
             let i = if lo & 3 != 3 {
@@ -588,6 +597,26 @@ pub fn run_static(path: &str, rv64: bool) -> Result<String, String> {
             }
             by_class[i.class as usize] += 1;
             *by_mnemonic.entry(i.mnemonic).or_default() += 1;
+            for r in [i.rs1, i.rs2] {
+                if let Some((d, load)) = pending[r as usize].take() {
+                    first_use.add((pos - d) as usize);
+                    if load {
+                        load_use.add((pos - d) as usize);
+                    }
+                }
+            }
+            if i.rd != 0 {
+                pending[i.rd as usize] = Some((pos, i.class == Class::Load));
+            }
+            if let Some(d) = i.sp_delta {
+                if d < 0 {
+                    frames.add((-d) as usize);
+                }
+            }
+            if i.ctl != Ctl::None {
+                pending = [None; 32];
+            }
+            pos += 1;
         }
     }
     let by_mnemonic: BTreeMap<String, u64> = by_mnemonic
@@ -595,13 +624,17 @@ pub fn run_static(path: &str, rv64: bool) -> Result<String, String> {
         .map(|(k, v)| (k.to_string(), *v))
         .collect();
     Ok(format!(
-        "{{\"file\": \"{}\", \"text_bytes\": {}, \"instructions\": {}, \"compressed\": {}, \"by_category\": {}, \"by_mnemonic\": {}}}",
+        "{{\"file\": \"{}\", \"text_bytes\": {}, \"instructions\": {}, \"compressed\": {}, \"by_category\": {}, \"by_mnemonic\": {}, \
+         \"first_use\": {}, \"load_use\": {}, \"frames\": {}}}",
         path,
         bytes,
         count,
         compressed,
         json_map(&categories(&by_class)),
-        json_map(&by_mnemonic)
+        json_map(&by_mnemonic),
+        first_use.json(),
+        load_use.json(),
+        frames.json()
     ))
 }
 
@@ -641,11 +674,23 @@ pub struct Rv32 {
     // Register values: position of the current definition and of its last use.
     def_pos: [Option<u64>; 32],
     last_use: [Option<u64>; 32],
+    /// Whether the current value of a register came from a load, and
+    /// whether its first use has been counted.
+    def_is_load: [bool; 32],
+    def_used: [bool; 32],
     defined: u64,
     discarded: u64,
     live_at_end: u64,
     lifetime: Hist,
     discarded_lifetime: Hist,
+    /// Instructions from a register's definition to its first use.
+    first_use: Hist,
+    /// First use of values produced by loads (the load-to-use distance).
+    load_use: Hist,
+    /// Bytes reserved on the stack (constant decrements of `sp`) and their
+    /// number.
+    stack_reserved: u64,
+    reservations: u64,
     /// Occupancy difference array, one entry per executed instruction.
     occupancy_diff: Vec<i8>,
     occupancy: Hist,
@@ -765,7 +810,17 @@ impl Rv32 {
         }
         for r in [i.rs1, i.rs2] {
             if r != 0 {
-                self.last_use[r as usize] = Some(t);
+                let r = r as usize;
+                self.last_use[r] = Some(t);
+                if !self.def_used[r] {
+                    self.def_used[r] = true;
+                    if let Some(d) = self.def_pos[r] {
+                        self.first_use.add((t - d) as usize);
+                        if self.def_is_load[r] {
+                            self.load_use.add((t - d) as usize);
+                        }
+                    }
+                }
             }
         }
         if i.rd != 0 {
@@ -788,7 +843,15 @@ impl Rv32 {
             self.defined += 1;
             self.def_pos[r] = Some(t);
             self.last_use[r] = None;
+            self.def_is_load[r] = i.class == Class::Load;
+            self.def_used[r] = false;
             if i.rd == SP {
+                if let Some(d) = i.sp_delta {
+                    if d < 0 {
+                        self.stack_reserved += (-d) as u64;
+                        self.reservations += 1;
+                    }
+                }
                 match (i.sp_delta, self.sp) {
                     (Some(d), Some(sp)) => {
                         let sp = sp + d as i64;
@@ -876,10 +939,10 @@ impl Rv32 {
         forms.insert("returns".into(), self.returns);
         format!(
             "{{\"instructions\": {}, \"blocks_executed\": {}, \"missing_blocks\": {}, \"by_category\": {}, \"by_mnemonic\": {}, \"forms\": {}, \
-             \"operands\": {{\"defined\": {}, \"discarded\": {}, \"live_at_end\": {}, \"lifetime\": {}, \"discarded_lifetime\": {}}}, \
+             \"operands\": {{\"defined\": {}, \"discarded\": {}, \"live_at_end\": {}, \"lifetime\": {}, \"discarded_lifetime\": {}, \"first_use\": {}, \"load_use\": {}}}, \
              \"occupancy\": {}, \"blocks\": {}, \
              \"memory\": {{\"loads\": {}, \"stores\": {}, \"load_bytes\": {}, \"store_bytes\": {}, \"stack_loads\": {}, \"stack_stores\": {}, \"pool_loads\": {}}}, \
-             \"stack\": {{\"max_depth_bytes\": {}, \"known\": {}}}}}",
+             \"stack\": {{\"max_depth_bytes\": {}, \"known\": {}, \"reserved_bytes\": {}, \"reservations\": {}}}}}",
             self.steps,
             self.traces,
             self.missing_blocks,
@@ -891,6 +954,8 @@ impl Rv32 {
             self.live_at_end,
             self.lifetime.json(),
             self.discarded_lifetime.json(),
+            self.first_use.json(),
+            self.load_use.json(),
             self.occupancy.json(),
             self.block_lengths.json(),
             self.loads,
@@ -902,6 +967,8 @@ impl Rv32 {
             self.pool_loads,
             -self.sp_min,
             self.sp_known,
+            self.stack_reserved,
+            self.reservations,
         )
     }
 }
