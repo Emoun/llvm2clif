@@ -300,8 +300,8 @@ def mix_rows(out, results, pick):
                    + f" | {pct(bm.get('echo', 0), n)} | {pct(fm.get('echo_long', 0), bm.get('echo', 0))} | {pct(bm.get('dup', 0), n)} | {pct(bm.get('const', 0) + bm.get('grow', 0), n)} | {pct(bm.get('cast', 0), n)} | {pct(fm.get('jmp_far', 0), jumps)} | {pct(narrow, ops)} |")
 
 
-PAPER_COLUMNS = ["code size static", "code size dynamic", "control", "memory", "data %", "stack ld %", "stack st %",
-                 "ref.", "lifetime", "life > 31 %", "reused %", "discard %"]
+PAPER_COLUMNS = ["code size static", "code size dynamic", "control", "memory", "data %", "const %", "stack ld %",
+                 "stack st %", "ref.", "lifetime", "life > 31 %", "reused %", "discard %"]
 
 
 def paper_cells(scry, rv):
@@ -322,6 +322,7 @@ def paper_cells(scry, rv):
         (sd["by_category"].get("control", 0), rv["dynamic"]["by_category"].get("control", 0), 0),
         (loads + stores, rvm["loads"] + rvm["stores"] + rvm.get("pool_loads", 0), 0),
         (100.0 * sd["by_category"].get("dataflow", 0), sd["steps"], 0),
+        (100.0 * sd["by_category"].get("constant", 0), sd["steps"], 0),
         (100.0 * m["stack_loads"], loads, 0),
         (100.0 * m["stack_stores"], stores, 0),
         (ss["out_refs"]["mean"] * ss["out_refs"]["count"], ss["out_refs"]["count"], -1),
@@ -347,14 +348,15 @@ def paper_table(out, results, rv_label, title):
     out.append(f"\n### {title}\n")
     out.append("Ratios are Scry over the RISC-V build: code bytes, fetched instruction bytes, executed control instructions "
                "(jumps, calls, returns), executed loads and stores (RISC-V's constant-pool loads included). The rest describes "
-               "the Scry build: the dataflow share of the executed instructions, the stack-indexed share of loads and of stores, "
+               "the Scry build: the dataflow share and the constant share (`const`, `grow`) of the executed instructions, the "
+               "stack-indexed share of loads and of stores, "
                "the mean static output reference and the mean operand lifetime (0 for the next instruction), the operands that "
                "live longer than 31 instructions, the values used at least twice (counting their `dup` copies) and the "
                "operands discarded. Pooled: from the totals over the benchmarks; "
                "geometric mean: over the benchmarks' values († without entries of zero).\n")
     out.append("| benchmark | " + " | ".join(PAPER_COLUMNS) + " |")
     out.append("|---|" + "---:|" * len(PAPER_COLUMNS))
-    fmt = ["{:.2f}"] * 4 + ["{:.1f}"] * 8
+    fmt = ["{:.2f}"] * 4 + ["{:.1f}"] * 9
 
     def cell(i, v):
         return fmt[i].format(v) if v is not None else "-"
