@@ -301,7 +301,7 @@ def mix_rows(out, results, pick):
 
 
 PAPER_COLUMNS = ["code size static", "code size dynamic", "control", "memory", "data %", "stack ld %", "stack st %",
-                 "ref.", "lifetime", "life > 31 %", "discard %"]
+                 "ref.", "lifetime", "life > 31 %", "reused %", "discard %"]
 
 
 def paper_cells(scry, rv):
@@ -327,6 +327,8 @@ def paper_cells(scry, rv):
         (ss["out_refs"]["mean"] * ss["out_refs"]["count"], ss["out_refs"]["count"], -1),
         (life["mean"] * life["count"], life["count"], -1),
         (100.0 * over if over is not None else None, life["count"], 0),
+        # Values (operands produced by anything but dup) consumed at least twice, counting their dup copies.
+        (100.0 * ops["reused"] if "roots" in ops else None, ops.get("roots", 0), 0),
         (100.0 * ops["discarded"], ops["produced"], 0),
     ]
 
@@ -347,11 +349,12 @@ def paper_table(out, results, rv_label, title):
                "(jumps, calls, returns), executed loads and stores (RISC-V's constant-pool loads included). The rest describes "
                "the Scry build: the dataflow share of the executed instructions, the stack-indexed share of loads and of stores, "
                "the mean static output reference and the mean operand lifetime (0 for the next instruction), the operands that "
-               "live longer than 31 instructions and the operands discarded. Pooled: from the totals over the benchmarks; "
+               "live longer than 31 instructions, the values used at least twice (counting their `dup` copies) and the "
+               "operands discarded. Pooled: from the totals over the benchmarks; "
                "geometric mean: over the benchmarks' values († without entries of zero).\n")
     out.append("| benchmark | " + " | ".join(PAPER_COLUMNS) + " |")
     out.append("|---|" + "---:|" * len(PAPER_COLUMNS))
-    fmt = ["{:.2f}"] * 4 + ["{:.1f}"] * 7
+    fmt = ["{:.2f}"] * 4 + ["{:.1f}"] * 8
 
     def cell(i, v):
         return fmt[i].format(v) if v is not None else "-"
@@ -400,6 +403,27 @@ def tables(results):
         o = r["dynamic"]["operands"]; lt = o["lifetime"]; occ = r["dynamic"]["occupancy"]
         out.append(f"| {name(r)} | {o['produced']} | {lt['mean']} | {lt['median']} | {lt['p90']} | {lt['p99']} | {lt['max']} | {pct(o['discarded'], o['produced'])} | "
                    f"{o['forwards_per_operand']['mean']} | {occ['mean']} | {occ['max']} |")
+
+    out.append("\n### Operand reuse (Scry)\n")
+    out.append("| benchmark | values | dup copies per 100 values | reused % | never used % | mean reuses of a used value | "
+               "0 % | 1 % | 2 % | 3-4 % | 5-8 % | 9-16 % | >16 % |")
+    out.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
+    for r in results:
+        ops = r["dynamic"]["operands"]
+        if "roots" not in ops:
+            out.append(f"| {name(r)} | - | - | - | - | - | - | - | - | - | - | - | - |")
+            continue
+        roots, h = ops["roots"], ops["reuses"]
+        # Buckets end at 0, 1, 2, 4, 8, 16, 32, ...: the last column pools everything beyond 16.
+        share = {hi: c for hi, c in h["buckets"]}
+        dist = [share.get(0, 0), share.get(1, 0), share.get(2, 0), share.get(4, 0), share.get(8, 0), share.get(16, 0),
+                sum(c for hi, c in h["buckets"] if hi > 16)]
+        out.append(f"| {name(r)} | {roots} | {100.0 * ops['copies'] / roots:.1f} | {pct(ops['reused'], roots)} | {pct(ops['unused'], roots)} | "
+                   f"{h['mean']:.2f} | " + " | ".join(pct(d, h["count"]) for d in dist) + " |")
+    out.append("\nValues: operands produced by anything but `dup` (a `dup` forwards its input and produces copies, which are "
+               "followed back to it). Reused: values consumed at least twice, counting their copies; never used: values whose "
+               "every operand was discarded. The distribution is of the consumptions beyond the first, over the values consumed "
+               "at least once.")
 
     out.append("\n### Control flow (Scry)\n")
     out.append("| benchmark | calls | jumps | returns | jump issue to trigger mean | p99 | max | block length mean | median | dataflow instr per block |")

@@ -35,6 +35,14 @@ at a time without storing it, and reports:
   by loads (`load_lifetime`, `load_first_hop`), how many values are
   produced and never consumed (`Discard`), and how many times a value is
   forwarded by `echo` on its way;
+* operand reuse: a value used more than once is duplicated by `dup`, which
+  forwards it and produces copies that the simulator reports as new
+  operands; the pass follows every copy (and copies of copies) back to the
+  value it came from and reports the values proper (`roots`: operands
+  produced by anything but `dup`), the copies, the values consumed at least
+  twice counting their copies (`reused`), the values never consumed
+  (`unused`) and the distribution of the consumptions beyond the first
+  (`reuses`, over the values consumed at least once);
 * occupancy: how many produced values are alive per step;
 * control flow: instructions from a jump, call or return being issued to its
   trigger (zero when the compiler uses no trigger delay, as it does today),

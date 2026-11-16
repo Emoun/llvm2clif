@@ -222,6 +222,23 @@ struct Dynamic {
     load_lifetime: Hist,
     /// First hop of values produced by loads.
     load_first_hop: Hist,
+    /// Values and their `dup` copies, by the root operand's id.
+    families: HashMap<u64, Family>,
+    /// Whether the instruction of the current step is a `dup`, the root of
+    /// the value it forwards once that is seen, and the copies it produced.
+    cur_is_dup: bool,
+    cur_dup_root: Option<u64>,
+    pending_copies: Vec<u64>,
+    /// Values (operands produced by anything but `dup`), the copies `dup`
+    /// made of them, the values consumed at least twice counting their
+    /// copies, and the values never consumed.
+    roots: u64,
+    copies: u64,
+    reused: u64,
+    unused: u64,
+    /// Consumptions beyond the first of each value, counting its copies
+    /// (over the values consumed at least once).
+    reuses: Hist,
     occupancy: Hist,
     /// Bytes reserved on the stack by `rsrv`, and the number of reservations.
     stack_reserved: u64,
@@ -247,12 +264,21 @@ struct Dynamic {
 }
 
 /// A live operand: when it was produced, how often it was forwarded, whether
-/// a load produced it, and the step of its first forward or consumption.
+/// a load produced it, the step of its first forward or consumption, and the
+/// value it is a copy of (itself, unless a `dup` produced it).
 struct Operand {
     birth: u64,
     forwards: u32,
     load: bool,
     first_hop: Option<u64>,
+    root: u64,
+}
+
+/// A value together with its `dup` copies: how many of them were consumed,
+/// and how many are still live.
+struct Family {
+    uses: u32,
+    alive: u32,
 }
 
 fn parse_hex(s: &str) -> Option<u64> {
@@ -274,6 +300,7 @@ impl Dynamic {
         if line == "STEP_END" {
             self.steps += 1;
             self.occupancy.add(self.live.len());
+            self.resolve_copies();
             return;
         }
         // Memory events carry their address in the name: `Load(0x1100): 4`.
@@ -331,6 +358,8 @@ impl Dynamic {
                 let cat = category(m);
                 *self.by_category.entry(cat.to_string()).or_default() += 1;
                 self.cur_is_load = m == "ld";
+                self.cur_is_dup = m == "dup";
+                self.cur_dup_root = None;
                 if m == "rsrv" {
                     // "rsrv 16" or "rsrv 16, base"
                     let n: u64 = text
@@ -366,8 +395,15 @@ impl Dynamic {
                                 forwards: 0,
                                 load: self.cur_is_load,
                                 first_hop: None,
+                                root: id,
                             },
                         );
+                        if self.cur_is_dup {
+                            self.pending_copies.push(id);
+                        } else {
+                            self.families.insert(id, Family { uses: 0, alive: 1 });
+                            self.roots += 1;
+                        }
                     }
                     "Forward" => {
                         self.forwards += 1;
@@ -375,6 +411,9 @@ impl Dynamic {
                             e.forwards += 1;
                             if e.first_hop.is_none() {
                                 e.first_hop = Some(self.steps - e.birth);
+                            }
+                            if self.cur_is_dup && self.cur_dup_root.is_none() {
+                                self.cur_dup_root = Some(e.root);
                             }
                         }
                     }
@@ -395,6 +434,7 @@ impl Dynamic {
                                 self.discarded_lifetime.add(life);
                             }
                             self.forwards_per_operand.add(op.forwards as usize);
+                            self.release(op.root, ev == "Consume");
                         }
                     }
                     _ => {}
@@ -462,6 +502,52 @@ impl Dynamic {
         }
     }
 
+    /// The operands a `dup` produced in the step that just ended are copies
+    /// of the value it forwarded; without a forward they are values of
+    /// their own.
+    fn resolve_copies(&mut self) {
+        for id in std::mem::take(&mut self.pending_copies) {
+            match self.cur_dup_root {
+                Some(root) if self.families.contains_key(&root) => {
+                    if let Some(op) = self.live.get_mut(&id) {
+                        op.root = root;
+                    }
+                    self.families.get_mut(&root).unwrap().alive += 1;
+                    self.copies += 1;
+                }
+                _ => {
+                    self.families.insert(id, Family { uses: 0, alive: 1 });
+                    self.roots += 1;
+                }
+            }
+        }
+    }
+
+    /// One operand of a value's family left the queue; once the last one
+    /// has, the value's uses are known.
+    fn release(&mut self, root: u64, consumed: bool) {
+        let Some(f) = self.families.get_mut(&root) else {
+            return;
+        };
+        if consumed {
+            f.uses += 1;
+        }
+        f.alive -= 1;
+        if f.alive == 0 {
+            let uses = f.uses;
+            self.families.remove(&root);
+            match uses {
+                0 => self.unused += 1,
+                n => {
+                    self.reuses.add((n - 1) as usize);
+                    if n >= 2 {
+                        self.reused += 1;
+                    }
+                }
+            }
+        }
+    }
+
     fn json(&self) -> String {
         let mut control = String::from("{");
         for (i, (k, h)) in self.control_lifetime.iter().enumerate() {
@@ -475,7 +561,8 @@ impl Dynamic {
             "{{\"steps\": {}, \"timed_out\": {}, \"returned\": \"{}\", \"by_category\": {}, \"by_mnemonic\": {}, \"forms\": {}, \
              \"operands\": {{\"produced\": {}, \"consumed\": {}, \"discarded\": {}, \"forwards\": {}, \"live_at_end\": {}, \
              \"by_type\": {}, \"lifetime\": {}, \"discarded_lifetime\": {}, \"forwards_per_operand\": {}, \
-             \"first_hop\": {}, \"load_lifetime\": {}, \"load_first_hop\": {}}}, \
+             \"first_hop\": {}, \"load_lifetime\": {}, \"load_first_hop\": {}, \
+             \"roots\": {}, \"copies\": {}, \"reused\": {}, \"unused\": {}, \"reuses\": {}}}, \
              \"occupancy\": {}, \"control\": {}, \
              \"memory\": {{\"loads\": {}, \"load_bytes\": {}, \"stores\": {}, \"store_bytes\": {}, \"stack_loads\": {}, \"stack_stores\": {}}}, \
              \"stack\": {{\"max_depth_bytes\": {}, \"reserved_bytes\": {}, \"reservations\": {}}}, \"blocks\": {}}}",
@@ -497,6 +584,11 @@ impl Dynamic {
             self.first_hop.json(),
             self.load_lifetime.json(),
             self.load_first_hop.json(),
+            self.roots,
+            self.copies,
+            self.reused,
+            self.unused,
+            self.reuses.json(),
             self.occupancy.json(),
             control,
             self.loads,
