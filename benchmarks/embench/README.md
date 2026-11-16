@@ -226,6 +226,38 @@ above (rust-wasmtime `f9fa226`, scryer `b1737e6`, wild `2b9f2b4`).
 | ud | 9806272 | 28.47 | 1 | 42 | 231 | 19515 |   1.6 | 1.53 | 16.13 | 25 |
 | xgboost | 17055402 | 35.58 | 1 | 81 | 412 | 17649923 |   3.4 | 2.37 | 16.98 | 22 |
 
+A value that is used more than once has to be duplicated: `dup` forwards it
+and produces copies, which the simulator reports as operands of their own.
+The table below follows every copy, and copy of a copy, back to the value it
+came from: how many values there are (operands produced by anything but
+`dup`), how many copies `dup` makes per 100 of them, the share used at least
+twice, the share never used, and the distribution of the uses beyond the
+first over the values used at all.
+
+### Operand reuse (Scry)
+
+| benchmark | values | dup copies per 100 values | reused % | never used % | mean reuses of a used value | 0 % | 1 % | 2 % | 3-4 % | 5-8 % | 9-16 % | >16 % |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| aha-mont64 | 30686080 | 29.6 |  13.5 |   2.9 | 0.27 |  86.1 |   6.8 |   3.9 |   3.2 |   0.1 |   0.0 |   0.0 |
+| crc32 | 10162427 | 5.2 |   5.2 |   0.0 | 0.05 |  94.8 |   5.2 |   0.0 |   0.0 |   0.0 |   0.0 |   0.0 |
+| depthconv | 11398663 | 19.8 |   9.2 |   1.8 | 0.19 |  90.6 |   4.2 |   2.3 |   2.3 |   0.5 |   0.0 |   0.0 |
+| edn | 12747077 | 16.0 |   7.6 |   0.1 | 0.16 |  92.4 |   4.9 |   0.2 |   2.4 |   0.0 |   0.0 |   0.1 |
+| huffbench | 10218464 | 18.5 |   8.1 |   1.7 | 0.16 |  91.7 |   6.4 |   0.7 |   0.3 |   0.8 |   0.0 |   0.0 |
+| matmult-int | 6915942 | 15.9 |   6.1 |   0.0 | 0.16 |  93.9 |   5.6 |   0.0 |   0.0 |   0.0 |   0.0 |   0.5 |
+| md5sum | 7421964 | 22.1 |   9.3 |   0.0 | 0.22 |  90.7 |   6.5 |   0.0 |   1.4 |   1.3 |   0.0 |   0.0 |
+| nettle-aes | 11396215 | 14.5 |   2.6 |   0.0 | 0.14 |  97.4 |   0.5 |   0.3 |   1.7 |   0.0 |   0.0 |   0.0 |
+| nsichneu | 9749542 | 3.3 |   0.0 |   0.0 | 0.00 | 100.0 |   0.0 |   0.0 |   0.0 |   0.0 |   0.0 |   0.0 |
+| picojpeg | 8164818 | 20.0 |  11.0 |   2.0 | 0.19 |  88.8 |   6.2 |   4.5 |   0.1 |   0.3 |   0.1 |   0.0 |
+| qrduino | 9017379 | 19.1 |   6.1 |   1.2 | 0.16 |  93.8 |   3.3 |   1.5 |   0.8 |   0.4 |   0.1 |   0.1 |
+| sglib-combined | 6733419 | 24.3 |   8.9 |   1.5 | 0.20 |  91.0 |   5.6 |   1.6 |   0.9 |   0.6 |   0.2 |   0.1 |
+| slre | 5760086 | 26.3 |   7.8 |   6.4 | 0.21 |  91.7 |   3.5 |   1.9 |   1.9 |   0.8 |   0.0 |   0.0 |
+| statemate | 7546026 | 4.4 |   1.9 |   1.0 | 0.04 |  98.1 |   1.5 |   0.3 |   0.0 |   0.0 |   0.1 |   0.0 |
+| tarfind | 6856771 | 24.9 |  15.4 |   0.0 | 0.24 |  84.6 |  14.2 |   0.6 |   0.6 |   0.0 |   0.0 |   0.1 |
+| ud | 8287525 | 18.3 |   4.4 |   0.5 | 0.17 |  95.6 |   1.2 |   1.2 |   1.4 |   0.3 |   0.2 |   0.1 |
+| xgboost | 13753192 | 24.0 |   9.6 |   2.7 | 0.23 |  90.2 |   4.4 |   3.7 |   1.1 |   0.5 |   0.0 |   0.0 |
+
+Values: operands produced by anything but `dup` (a `dup` forwards its input and produces copies, which are followed back to it). Reused: values consumed at least twice, counting their copies; never used: values whose every operand was discarded. The distribution is of the consumptions beyond the first, over the values consumed at least once.
+
 ### Control flow (Scry)
 
 | benchmark | calls | jumps | returns | jump issue to trigger mean | p99 | max | block length mean | median | dataflow instr per block |
@@ -609,55 +641,55 @@ are missing (see the status table at the top).
 
 ### Compiler table: Scry against rv64imc through Cranelift
 
-Ratios are Scry over the RISC-V build: code bytes, fetched instruction bytes, executed control instructions (jumps, calls, returns), executed loads and stores (RISC-V's constant-pool loads included). The rest describes the Scry build: the dataflow share of the executed instructions, the stack-indexed share of loads and of stores, the mean static output reference and the mean operand lifetime (0 for the next instruction), the operands that live longer than 31 instructions and the operands discarded. Pooled: from the totals over the benchmarks; geometric mean: over the benchmarks' values († without entries of zero).
+Ratios are Scry over the RISC-V build: code bytes, fetched instruction bytes, executed control instructions (jumps, calls, returns), executed loads and stores (RISC-V's constant-pool loads included). The rest describes the Scry build: the dataflow share and the constant share (`const`, `grow`) of the executed instructions, the stack-indexed share of loads and of stores, the mean static output reference and the mean operand lifetime (0 for the next instruction), the operands that live longer than 31 instructions, the values used at least twice (counting their `dup` copies) and the operands discarded. Pooled: from the totals over the benchmarks; geometric mean: over the benchmarks' values († without entries of zero).
 
-| benchmark | code size static | code size dynamic | control | memory | data % | stack ld % | stack st % | ref. | lifetime | life > 31 % | discard % |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| aha-mont64 | 1.47 | 9.39 | 0.73 | 0.97 | 53.2 | 100.0 | 51.1 | 14.8 | 93.0 | 20.9 | 4.6 |
-| crc32 | 0.30 | 1.54 | 1.33 | 0.75 | 30.8 | 0.0 | 0.0 | 2.6 | 12.3 | 4.9 | 0.0 |
-| depthconv | 0.47 | 3.28 | 0.67 | 1.00 | 36.2 | 0.0 | 0.0 | 7.2 | 19.7 | 11.9 | 2.7 |
-| edn | 0.93 | 1.94 | 1.44 | 0.98 | 47.3 | 0.0 | 0.0 | 15.9 | 21.7 | 10.2 | 0.2 |
-| huffbench | 1.64 | 2.80 | 0.84 | 0.91 | 53.4 | 0.0 | 0.0 | 5.6 | 32.6 | 10.9 | 3.4 |
-| matmult-int | 0.76 | 1.37 | 0.54 | 0.44 | 39.7 | 0.0 | 0.0 | 19.6 | 52.9 | 8.9 | 0.3 |
-| md5sum | 0.84 | 2.45 | 1.00 | 1.00 | 52.9 | 0.0 | 0.0 | 4.7 | 36.8 | 10.2 | 0.0 |
-| nettle-aes | 1.22 | 1.72 | 0.97 | 0.98 | 37.8 | 0.0 | 0.5 | 20.3 | 53.6 | 13.1 | 0.3 |
-| nsichneu | 1.90 | 1.89 | 1.19 | 1.00 | 35.0 | 0.0 | 0.0 | 4.6 | 9.3 | 0.1 | 3.1 |
-| picojpeg | 1.55 | 1.19 | 0.15 | 0.88 | 41.4 | 0.0 | 0.0 | 7.4 | 23.5 | 11.9 | 3.2 |
-| qrduino | 1.52 | 2.11 | 0.80 | 0.95 | 53.6 | 0.0 | 0.0 | 5.8 | 34.1 | 10.4 | 3.5 |
-| sglib-combined | 1.17 | 3.09 | 1.05 | 0.75 | 61.1 | 3.3 | 8.9 | 6.0 | 43.6 | 10.1 | 5.2 |
-| slre | 2.29 | 2.73 | 0.94 | 0.23 | 69.4 | 13.3 | 67.7 | 9.2 | 135.8 | 15.9 | 10.2 |
-| statemate | 0.85 | 1.05 | 1.09 | 0.96 | 13.8 | 0.0 | 0.0 | 2.3 | 11.6 | 3.1 | 1.7 |
-| tarfind | 1.31 | 2.65 | 1.04 | 0.94 | 45.5 | 0.0 | 0.0 | 4.6 | 25.8 | 7.2 | 0.4 |
-| ud | 0.90 | 2.15 | 1.18 | 0.95 | 48.0 | 0.0 | 1.2 | 4.7 | 27.5 | 13.2 | 1.6 |
-| xgboost | 0.48 | 1.71 | 1.00 | 1.00 | 58.1 | 0.1 | 37.5 | 3.8 | 34.6 | 13.3 | 3.4 |
-| **pooled** | 1.45 | 2.30 | 0.80 | 0.84 | 48.9 | 1.0 | 2.3 | 7.0 | 44.5 | 12.0 | 2.7 |
-| **geo. mean** | 1.02 | 2.19 | 0.86 | 0.82 | 43.4 | 0.0 | 0.0 | 6.7 | 30.9 | 7.5 | 1.0 |
+| benchmark | code size static | code size dynamic | control | memory | data % | const % | stack ld % | stack st % | ref. | lifetime | life > 31 % | reused % | discard % |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| aha-mont64 | 1.47 | 9.39 | 0.73 | 0.97 | 53.2 | 18.4 | 100.0 | 51.1 | 14.8 | 93.0 | 20.9 | 13.5 | 4.6 |
+| crc32 | 0.30 | 1.54 | 1.33 | 0.75 | 30.8 | 41.7 | 0.0 | 0.0 | 2.6 | 12.3 | 4.9 | 5.2 | 0.0 |
+| depthconv | 0.47 | 3.28 | 0.67 | 1.00 | 36.2 | 26.7 | 0.0 | 0.0 | 7.2 | 19.7 | 11.9 | 9.2 | 2.7 |
+| edn | 0.93 | 1.94 | 1.44 | 0.98 | 47.3 | 22.4 | 0.0 | 0.0 | 15.9 | 21.7 | 10.2 | 7.6 | 0.2 |
+| huffbench | 1.64 | 2.80 | 0.84 | 0.91 | 53.4 | 20.4 | 0.0 | 0.0 | 5.6 | 32.6 | 10.9 | 8.1 | 3.4 |
+| matmult-int | 0.76 | 1.37 | 0.54 | 0.44 | 39.7 | 30.5 | 0.0 | 0.0 | 19.6 | 52.9 | 8.9 | 6.1 | 0.3 |
+| md5sum | 0.84 | 2.45 | 1.00 | 1.00 | 52.9 | 22.0 | 0.0 | 0.0 | 4.7 | 36.8 | 10.2 | 9.3 | 0.0 |
+| nettle-aes | 1.22 | 1.72 | 0.97 | 0.98 | 37.8 | 25.9 | 0.0 | 0.5 | 20.3 | 53.6 | 13.1 | 2.6 | 0.3 |
+| nsichneu | 1.90 | 1.89 | 1.19 | 1.00 | 35.0 | 41.8 | 0.0 | 0.0 | 4.6 | 9.3 | 0.1 | 0.0 | 3.1 |
+| picojpeg | 1.55 | 1.19 | 0.15 | 0.88 | 41.4 | 26.8 | 0.0 | 0.0 | 7.4 | 23.5 | 11.9 | 11.0 | 3.2 |
+| qrduino | 1.52 | 2.11 | 0.80 | 0.95 | 53.6 | 21.9 | 0.0 | 0.0 | 5.8 | 34.1 | 10.4 | 6.1 | 3.5 |
+| sglib-combined | 1.17 | 3.09 | 1.05 | 0.75 | 61.1 | 16.8 | 3.3 | 8.9 | 6.0 | 43.6 | 10.1 | 8.9 | 5.2 |
+| slre | 2.29 | 2.73 | 0.94 | 0.23 | 69.4 | 13.8 | 13.3 | 67.7 | 9.2 | 135.8 | 15.9 | 7.8 | 10.2 |
+| statemate | 0.85 | 1.05 | 1.09 | 0.96 | 13.8 | 63.5 | 0.0 | 0.0 | 2.3 | 11.6 | 3.1 | 1.9 | 1.7 |
+| tarfind | 1.31 | 2.65 | 1.04 | 0.94 | 45.5 | 25.9 | 0.0 | 0.0 | 4.6 | 25.8 | 7.2 | 15.4 | 0.4 |
+| ud | 0.90 | 2.15 | 1.18 | 0.95 | 48.0 | 24.6 | 0.0 | 1.2 | 4.7 | 27.5 | 13.2 | 4.4 | 1.6 |
+| xgboost | 0.48 | 1.71 | 1.00 | 1.00 | 58.1 | 18.3 | 0.1 | 37.5 | 3.8 | 34.6 | 13.3 | 9.6 | 3.4 |
+| **pooled** | 1.45 | 2.30 | 0.80 | 0.84 | 48.9 | 24.1 | 1.0 | 2.3 | 7.0 | 44.5 | 12.0 | 8.1 | 2.7 |
+| **geo. mean** | 1.02 | 2.19 | 0.86 | 0.82 | 43.4 | 25.2 | 0.0 | 0.0 | 6.7 | 30.9 | 7.5 | 4.8 | 1.0 |
 
 ### Compiler table: Scry against rv32imc through LLVM
 
-Ratios are Scry over the RISC-V build: code bytes, fetched instruction bytes, executed control instructions (jumps, calls, returns), executed loads and stores (RISC-V's constant-pool loads included). The rest describes the Scry build: the dataflow share of the executed instructions, the stack-indexed share of loads and of stores, the mean static output reference and the mean operand lifetime (0 for the next instruction), the operands that live longer than 31 instructions and the operands discarded. Pooled: from the totals over the benchmarks; geometric mean: over the benchmarks' values († without entries of zero).
+Ratios are Scry over the RISC-V build: code bytes, fetched instruction bytes, executed control instructions (jumps, calls, returns), executed loads and stores (RISC-V's constant-pool loads included). The rest describes the Scry build: the dataflow share and the constant share (`const`, `grow`) of the executed instructions, the stack-indexed share of loads and of stores, the mean static output reference and the mean operand lifetime (0 for the next instruction), the operands that live longer than 31 instructions, the values used at least twice (counting their `dup` copies) and the operands discarded. Pooled: from the totals over the benchmarks; geometric mean: over the benchmarks' values († without entries of zero).
 
-| benchmark | code size static | code size dynamic | control | memory | data % | stack ld % | stack st % | ref. | lifetime | life > 31 % | discard % |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| aha-mont64 | 1.85 | 5.87 | 1.05 | 1.27 | 53.2 | 100.0 | 51.1 | 14.8 | 93.0 | 20.9 | 4.6 |
-| crc32 | 0.49 | 2.76 | 1.33 | 1.00 | 30.8 | 0.0 | 0.0 | 2.6 | 12.3 | 4.9 | 0.0 |
-| depthconv | 0.68 | 3.75 | 0.41 | 0.98 | 36.2 | 0.0 | 0.0 | 7.2 | 19.7 | 11.9 | 2.7 |
-| edn | 1.46 | 4.13 | 1.97 | 0.98 | 47.3 | 0.0 | 0.0 | 15.9 | 21.7 | 10.2 | 0.2 |
-| huffbench | 2.63 | 5.72 | 1.37 | 1.00 | 53.4 | 0.0 | 0.0 | 5.6 | 32.6 | 10.9 | 3.4 |
-| matmult-int | 1.30 | 3.96 | 1.98 | 0.92 | 39.7 | 0.0 | 0.0 | 19.6 | 52.9 | 8.9 | 0.3 |
-| md5sum | 1.24 | 3.77 | 1.56 | 1.00 | 52.9 | 0.0 | 0.0 | 4.7 | 36.8 | 10.2 | 0.0 |
-| nettle-aes | 2.03 | 3.20 | 1.51 | 1.00 | 37.8 | 0.0 | 0.5 | 20.3 | 53.6 | 13.1 | 0.3 |
-| nsichneu | 4.83 | 5.05 | 1.20 | 1.00 | 35.0 | 0.0 | 0.0 | 4.6 | 9.3 | 0.1 | 3.1 |
-| picojpeg | 3.12 | 2.67 | 1.10 | 0.83 | 41.4 | 0.0 | 0.0 | 7.4 | 23.5 | 11.9 | 3.2 |
-| qrduino | 2.58 | 3.71 | 1.25 | 1.00 | 53.6 | 0.0 | 0.0 | 5.8 | 34.1 | 10.4 | 3.5 |
-| sglib-combined | 1.85 | 5.20 | 1.18 | 0.82 | 61.1 | 3.3 | 8.9 | 6.0 | 43.6 | 10.1 | 5.2 |
-| slre | 4.49 | 5.55 | 1.24 | 0.27 | 69.4 | 13.3 | 67.7 | 9.2 | 135.8 | 15.9 | 10.2 |
-| statemate | 1.77 | 1.57 | 0.72 | 0.85 | 13.8 | 0.0 | 0.0 | 2.3 | 11.6 | 3.1 | 1.7 |
-| tarfind | 1.95 | 3.36 | 1.83 | 1.00 | 45.5 | 0.0 | 0.0 | 4.6 | 25.8 | 7.2 | 0.4 |
-| ud | 1.44 | 4.61 | 1.43 | 0.95 | 48.0 | 0.0 | 1.2 | 4.7 | 27.5 | 13.2 | 1.6 |
-| xgboost | 0.73 | 3.23 | 0.76 | 1.00 | 58.1 | 0.1 | 37.5 | 3.8 | 34.6 | 13.3 | 3.4 |
-| **pooled** | 2.73 | 3.96 | 1.23 | 0.90 | 48.9 | 1.0 | 2.3 | 7.0 | 44.5 | 12.0 | 2.7 |
-| **geo. mean** | 1.71 | 3.82 | 1.21 | 0.90 | 43.4 | 0.0 | 0.0 | 6.7 | 30.9 | 7.5 | 1.0 |
+| benchmark | code size static | code size dynamic | control | memory | data % | const % | stack ld % | stack st % | ref. | lifetime | life > 31 % | reused % | discard % |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| aha-mont64 | 1.85 | 5.87 | 1.05 | 1.27 | 53.2 | 18.4 | 100.0 | 51.1 | 14.8 | 93.0 | 20.9 | 13.5 | 4.6 |
+| crc32 | 0.49 | 2.76 | 1.33 | 1.00 | 30.8 | 41.7 | 0.0 | 0.0 | 2.6 | 12.3 | 4.9 | 5.2 | 0.0 |
+| depthconv | 0.68 | 3.75 | 0.41 | 0.98 | 36.2 | 26.7 | 0.0 | 0.0 | 7.2 | 19.7 | 11.9 | 9.2 | 2.7 |
+| edn | 1.46 | 4.13 | 1.97 | 0.98 | 47.3 | 22.4 | 0.0 | 0.0 | 15.9 | 21.7 | 10.2 | 7.6 | 0.2 |
+| huffbench | 2.63 | 5.72 | 1.37 | 1.00 | 53.4 | 20.4 | 0.0 | 0.0 | 5.6 | 32.6 | 10.9 | 8.1 | 3.4 |
+| matmult-int | 1.30 | 3.96 | 1.98 | 0.92 | 39.7 | 30.5 | 0.0 | 0.0 | 19.6 | 52.9 | 8.9 | 6.1 | 0.3 |
+| md5sum | 1.24 | 3.77 | 1.56 | 1.00 | 52.9 | 22.0 | 0.0 | 0.0 | 4.7 | 36.8 | 10.2 | 9.3 | 0.0 |
+| nettle-aes | 2.03 | 3.20 | 1.51 | 1.00 | 37.8 | 25.9 | 0.0 | 0.5 | 20.3 | 53.6 | 13.1 | 2.6 | 0.3 |
+| nsichneu | 4.83 | 5.05 | 1.20 | 1.00 | 35.0 | 41.8 | 0.0 | 0.0 | 4.6 | 9.3 | 0.1 | 0.0 | 3.1 |
+| picojpeg | 3.12 | 2.67 | 1.10 | 0.83 | 41.4 | 26.8 | 0.0 | 0.0 | 7.4 | 23.5 | 11.9 | 11.0 | 3.2 |
+| qrduino | 2.58 | 3.71 | 1.25 | 1.00 | 53.6 | 21.9 | 0.0 | 0.0 | 5.8 | 34.1 | 10.4 | 6.1 | 3.5 |
+| sglib-combined | 1.85 | 5.20 | 1.18 | 0.82 | 61.1 | 16.8 | 3.3 | 8.9 | 6.0 | 43.6 | 10.1 | 8.9 | 5.2 |
+| slre | 4.49 | 5.55 | 1.24 | 0.27 | 69.4 | 13.8 | 13.3 | 67.7 | 9.2 | 135.8 | 15.9 | 7.8 | 10.2 |
+| statemate | 1.77 | 1.57 | 0.72 | 0.85 | 13.8 | 63.5 | 0.0 | 0.0 | 2.3 | 11.6 | 3.1 | 1.9 | 1.7 |
+| tarfind | 1.95 | 3.36 | 1.83 | 1.00 | 45.5 | 25.9 | 0.0 | 0.0 | 4.6 | 25.8 | 7.2 | 15.4 | 0.4 |
+| ud | 1.44 | 4.61 | 1.43 | 0.95 | 48.0 | 24.6 | 0.0 | 1.2 | 4.7 | 27.5 | 13.2 | 4.4 | 1.6 |
+| xgboost | 0.73 | 3.23 | 0.76 | 1.00 | 58.1 | 18.3 | 0.1 | 37.5 | 3.8 | 34.6 | 13.3 | 9.6 | 3.4 |
+| **pooled** | 2.73 | 3.96 | 1.23 | 0.90 | 48.9 | 24.1 | 1.0 | 2.3 | 7.0 | 44.5 | 12.0 | 8.1 | 2.7 |
+| **geo. mean** | 1.71 | 3.82 | 1.21 | 0.90 | 43.4 | 25.2 | 0.0 | 0.0 | 6.7 | 30.9 | 7.5 | 4.8 | 1.0 |
 
 ### Reading the numbers
 
@@ -899,6 +931,16 @@ compiler uses them today, and it is where the leverage is.
   sglib-combined, with variable-length arrays, cannot be followed on
   RISC-V from the log. Memory traffic in bytes is 30 MB on Scry, 34 MB on
   rv32imc and 60 MB on rv64imc, whose spills and pointers are 8 bytes.
+
+**Operand reuse.** A value used more than once costs a `dup` per extra use,
+and the "Operand reuse" table follows the copies back to their values: 8.1 %
+of the 177 M values are used at least twice, 1.4 % never, and `dup` makes
+19 copies per 100 values, about a tenth of which are discarded unused. Of
+the values used at all, 91.8 % are used once, 4.8 % twice, 1.7 % three
+times, 1.4 % four or five times and 0.4 % more often, 0.18 uses beyond the
+first on average. Reuse is lowest in nsichneu (0.01 %: every test is on a
+freshly loaded value) and highest in tarfind (15.4 %) and aha-mont64
+(13.5 %).
 
 **Simulator speed.** scryer `b1737e6` runs about 80 k instructions per
 second with events streamed to a pipe (the flush per step dominates) and
