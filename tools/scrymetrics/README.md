@@ -27,7 +27,9 @@ at a time without storing it, and reports:
 * the dynamic instruction mix by mnemonic and category, with the same two
   forms (`forms`: `jmp_far`, `jmp_short`, `echo_long`, `echo_short`);
 * operand lifetimes: instructions from a value's production to its final
-  consumption (mean, median, 90th and 99th percentile, maximum), the
+  consumption (a histogram, like every distribution here: mean, median, 90th
+  and 99th percentile, maximum, and the counts by power-of-two bucket as
+  `[upper bound, count]` pairs: 0, 1, 2, 3-4, 5-8, ...), the
   distance to its first forward or consumption (`first_hop`, the dynamic
   counterpart of the output reference), the same two for values produced
   by loads (`load_lifetime`, `load_first_hop`), how many values are

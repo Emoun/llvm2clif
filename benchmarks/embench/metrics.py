@@ -25,7 +25,7 @@ RISC-V parts need clang with the RISC-V target, opt, llc, ld.lld, qemu-riscv32
 and qemu-riscv64 (SCRY_CLANG, SCRY_OPT, SCRY_LLC, SCRY_LLD, SCRY_QEMU, SCRY_QEMU64
 name them) and, for rv64, the llvm2clif binary (SCRY_LLVM2CLIF).
 """
-import argparse, json, os, shutil, statistics, struct, subprocess, sys, tempfile
+import argparse, json, math, os, shutil, statistics, struct, subprocess, sys, tempfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -300,6 +300,81 @@ def mix_rows(out, results, pick):
                    + f" | {pct(bm.get('echo', 0), n)} | {pct(fm.get('echo_long', 0), bm.get('echo', 0))} | {pct(bm.get('dup', 0), n)} | {pct(bm.get('const', 0) + bm.get('grow', 0), n)} | {pct(bm.get('cast', 0), n)} | {pct(fm.get('jmp_far', 0), jumps)} | {pct(narrow, ops)} |")
 
 
+PAPER_COLUMNS = ["code size static", "code size dynamic", "control", "memory", "data %", "stack ld %", "stack st %",
+                 "ref.", "lifetime", "life > 31 %", "discard %"]
+
+
+def paper_cells(scry, rv):
+    """The cells of one benchmark in the compiler table, each as (numerator,
+    denominator, offset): the value is numerator / denominator + offset, and a
+    pooled row divides the sums. The first four are ratios to the RISC-V build,
+    the rest describe the Scry build alone."""
+    sd, ss = scry["dynamic"], scry["static"]
+    m, ops, life = sd["memory"], sd["operands"], sd["operands"]["lifetime"]
+    rvm = rv["dynamic"]["memory"]
+    loads, stores = m["loads"] + m["stack_loads"], m["stores"] + m["stack_stores"]
+    # Lifetimes count 1 for the next instruction; the paper counts 0, so "over 31" is 33 and more here
+    # (the histogram's buckets from the one ending at 64 on); unknown without the buckets of older results.
+    over = sum(c for hi, c in life["buckets"] if hi >= 64) if "buckets" in life else None
+    return [
+        (ss["text_bytes"], rv["static"]["text_bytes"], 0),
+        (fetched(scry), fetched(rv), 0),
+        (sd["by_category"].get("control", 0), rv["dynamic"]["by_category"].get("control", 0), 0),
+        (loads + stores, rvm["loads"] + rvm["stores"] + rvm.get("pool_loads", 0), 0),
+        (100.0 * sd["by_category"].get("dataflow", 0), sd["steps"], 0),
+        (100.0 * m["stack_loads"], loads, 0),
+        (100.0 * m["stack_stores"], stores, 0),
+        (ss["out_refs"]["mean"] * ss["out_refs"]["count"], ss["out_refs"]["count"], -1),
+        (life["mean"] * life["count"], life["count"], -1),
+        (100.0 * over if over is not None else None, life["count"], 0),
+        (100.0 * ops["discarded"], ops["produced"], 0),
+    ]
+
+
+def paper_table(out, results, rv_label, title):
+    """The table the Scry authors use to evaluate their compiler, Scry against the
+    build labelled `rv_label`: a row per benchmark, the pooled values and the
+    geometric mean."""
+    rows = []
+    for r in results:
+        vs = {v["label"]: v for v in variants(r)}
+        if "Scry" in vs and rv_label in vs:
+            rows.append((name(r), paper_cells(vs["Scry"], vs[rv_label])))
+    if not rows:
+        return
+    out.append(f"\n### {title}\n")
+    out.append("Ratios are Scry over the RISC-V build: code bytes, fetched instruction bytes, executed control instructions "
+               "(jumps, calls, returns), executed loads and stores (RISC-V's constant-pool loads included). The rest describes "
+               "the Scry build: the dataflow share of the executed instructions, the stack-indexed share of loads and of stores, "
+               "the mean static output reference and the mean operand lifetime (0 for the next instruction), the operands that "
+               "live longer than 31 instructions and the operands discarded. Pooled: from the totals over the benchmarks; "
+               "geometric mean: over the benchmarks' values († without entries of zero).\n")
+    out.append("| benchmark | " + " | ".join(PAPER_COLUMNS) + " |")
+    out.append("|---|" + "---:|" * len(PAPER_COLUMNS))
+    fmt = ["{:.2f}"] * 4 + ["{:.1f}"] * 7
+
+    def cell(i, v):
+        return fmt[i].format(v) if v is not None else "-"
+
+    values = []
+    for bench, cells in rows:
+        vals = [n / d + o if d and n is not None else None for n, d, o in cells]
+        values.append(vals)
+        out.append(f"| {bench} | " + " | ".join(cell(i, v) for i, v in enumerate(vals)) + " |")
+    pooled = []
+    for i in range(len(PAPER_COLUMNS)):
+        ns, d = [c[i][0] for _, c in rows], sum(c[i][1] for _, c in rows)
+        pooled.append(sum(ns) / d + rows[0][1][i][2] if d and None not in ns else None)
+    out.append("| **pooled** | " + " | ".join(cell(i, v) for i, v in enumerate(pooled)) + " |")
+    geo = []
+    for i in range(len(PAPER_COLUMNS)):
+        col = [vals[i] for vals in values if vals[i] is not None]
+        pos = [v for v in col if v > 0]
+        g = math.exp(sum(math.log(v) for v in pos) / len(pos)) if pos else None
+        geo.append(cell(i, g) + ("†" if len(pos) < len(col) else ""))
+    out.append("| **geo. mean** | " + " | ".join(geo) + " |")
+
+
 def tables(results):
     results = [r for r in results if r.get("dynamic")]
     out = []
@@ -403,6 +478,8 @@ def tables(results):
         out.append("\n? the RISC-V code sets `sp` from a register (a variable-length array), which the execution log cannot follow.")
     if any(r["dynamic"].get("timed_out") for r in results):
         out.append("\n\\* traced up to the instruction limit given with `--sim-args` only; the program did not run to completion.")
+    paper_table(out, results, "rv64imc Cranelift", "Compiler table: Scry against rv64imc through Cranelift")
+    paper_table(out, results, "rv32imc llc", "Compiler table: Scry against rv32imc through LLVM")
     return "\n".join(out)
 
 

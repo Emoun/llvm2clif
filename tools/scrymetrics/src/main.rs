@@ -76,15 +76,33 @@ impl Hist {
             self.sum as f64 / self.total as f64
         }
     }
+    /// The counts by power-of-two bucket, as `[upper bound, count]` pairs:
+    /// 0 and 1 on their own, then (1, 2], (2, 4], (4, 8], ... up to the
+    /// largest value seen.
+    fn buckets(&self) -> String {
+        let max = self.max();
+        let (mut lo, mut hi) = (0usize, 0usize);
+        let mut out = Vec::new();
+        loop {
+            let count: u64 = self.counts.iter().skip(lo).take(hi - lo + 1).sum();
+            out.push(format!("[{hi}, {count}]"));
+            if hi >= max {
+                return format!("[{}]", out.join(", "));
+            }
+            lo = hi + 1;
+            hi = if hi == 0 { 1 } else { hi * 2 };
+        }
+    }
     fn json(&self) -> String {
         format!(
-            "{{\"count\": {}, \"mean\": {:.2}, \"median\": {}, \"p90\": {}, \"p99\": {}, \"max\": {}}}",
+            "{{\"count\": {}, \"mean\": {:.2}, \"median\": {}, \"p90\": {}, \"p99\": {}, \"max\": {}, \"buckets\": {}}}",
             self.total,
             self.mean(),
             self.quantile(0.5),
             self.quantile(0.9),
             self.quantile(0.99),
-            self.max()
+            self.max(),
+            self.buckets()
         )
     }
 }
